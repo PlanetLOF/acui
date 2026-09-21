@@ -1,0 +1,37 @@
+name: acui
+description: "acui — the autocipher desktop app (Flutter)."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  autocipher_dart: ^0.1.0
+  flutter_riverpod: ^3.4.3
+  flutter_svg: ^2.3.0
+  file_selector: ^1.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+dependency_overrides:
+  autocipher_dart:
+    git:
+      url: https://github.com/PlanetLOF/autocipher
+      path: dart
+
+flutter:
+  uses-material-design: true
+
+  # Branding assets (no native engine copies here — autocipher_dart bundles
+  # its own library under lib/src/native/<os>/ and resolves it at runtime).
+  assets:
+    - assets/pic_svg/
