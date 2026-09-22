@@ -1,5 +1,7 @@
-// The vault browser: list plaintext entries, import from the host filesystem,
-// extract / preview / rename / delete individual files, and open settings.
+// The vault browser: browse plaintext entries in folders (derived from stored
+// name prefixes, with `.ackeep` markers persisting empty folders), import from
+// the host filesystem, extract / preview / rename / delete individual files and
+// folders, toggle list/grid view, and open settings.
 //
 // The scene is mounted by the app shell whenever a vault session is open.
 // Every engine operation is dispatched through the vault providers on a
@@ -8,16 +10,19 @@
 //
 // File pickers come from `FileService` (file_selector).
 
-import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:autocipher_dart/autocipher_dart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../provider/browser_provider.dart';
 import '../provider/session_provider.dart';
 import 'common/action_sheet.dart';
 import 'format.dart';
+import 'preview.dart';
+import 'vault_model.dart';
 import 'vault_settings_sheet.dart';
 
 /// The open vault's file browser.
@@ -29,6 +34,9 @@ class VaultBrowserScreen extends ConsumerWidget {
     final files = ref.watch(vaultFilesProvider);
     final info = ref.watch(vaultInfoProvider);
     final actions = ref.watch(vaultActionsProvider);
+    final dir = ref.watch(currentVaultFolderProvider);
+    final view = ref.watch(browserViewProvider).value ?? BrowserView.list;
+    final inFolder = dir.isNotEmpty;
 
     // Surface transient results/failures from vault mutations as snackbars.
     ref.listen<String?>(vaultActionsProvider.select((s) => s.notice), (
@@ -38,22 +46,55 @@ class VaultBrowserScreen extends ConsumerWidget {
       if (notice != null) showSnack(context, notice);
     });
 
-    final title = info.maybeWhen(
+    final vaultName = info.maybeWhen(
       data: (i) => basenameOf(i.path),
       orElse: () => 'Vault',
     );
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(title),
+        title: Text(
+          inFolder ? dir : vaultName,
+          overflow: TextOverflow.ellipsis,
+        ),
         leading: IconButton(
-          tooltip: 'Lock vault',
+          tooltip: inFolder ? 'Up' : 'Lock vault',
           onPressed: actions.busy
               ? null
-              : () => ref.read(vaultSessionProvider.notifier).close(),
-          icon: const Icon(Icons.lock_outline),
+              : () {
+                  if (inFolder) {
+                    _goUp(ref, dir);
+                  } else {
+                    ref.read(vaultSessionProvider.notifier).close();
+                  }
+                },
+          icon: Icon(inFolder ? Icons.arrow_back : Icons.lock_outline),
         ),
         actions: [
+          IconButton(
+            tooltip: 'New folder',
+            onPressed: actions.busy
+                ? null
+                : () => _newFolderDialog(context, ref),
+            icon: const Icon(Icons.create_new_folder_outlined),
+          ),
+          IconButton(
+            tooltip: view == BrowserView.grid ? 'List view' : 'Grid view',
+            onPressed: actions.busy
+                ? null
+                : () => ref
+                      .read(browserViewProvider.notifier)
+                      .select(
+                        view == BrowserView.grid
+                            ? BrowserView.list
+                            : BrowserView.grid,
+                      ),
+            icon: Icon(
+              view == BrowserView.grid
+                  ? Icons.view_list_outlined
+                  : Icons.grid_view_outlined,
+            ),
+          ),
           IconButton(
             tooltip: 'Refresh',
             onPressed: actions.busy ? null : () => _refresh(ref),
@@ -77,10 +118,18 @@ class VaultBrowserScreen extends ConsumerWidget {
       body: Column(
         children: [
           if (actions.busy) const LinearProgressIndicator(minHeight: 2),
-          Expanded(child: _buildBody(context, ref, files)),
+          Expanded(child: _buildBody(context, ref, files, dir, view)),
         ],
       ),
     );
+  }
+
+  void _goUp(WidgetRef ref, String dir) {
+    ref.read(currentVaultFolderProvider.notifier).go(parentOfPath(dir));
+  }
+
+  void _enterFolder(WidgetRef ref, String path) {
+    ref.read(currentVaultFolderProvider.notifier).go(path);
   }
 
   void _refresh(WidgetRef ref) {
@@ -98,6 +147,8 @@ class VaultBrowserScreen extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     AsyncValue<List<VaultFileInfo>> files,
+    String dir,
+    BrowserView view,
   ) {
     return files.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -125,27 +176,129 @@ class VaultBrowserScreen extends ConsumerWidget {
             child: Text('Empty vault — use Import to add files.'),
           );
         }
+        final entries = buildBrowserEntries(list, dir);
+        if (entries.isEmpty) {
+          return const Center(child: Text('Empty folder.'));
+        }
         return RefreshIndicator(
           onRefresh: () => _pullToRefresh(ref),
-          child: ListView.builder(
-            // Clearance so the floating IMPORT button never covers the last
-            // row's Actions (⋯) popup.
-            padding: const EdgeInsets.only(bottom: 88),
-            itemCount: list.length,
-            itemBuilder: (context, index) {
-              final file = list[index];
-              return ListTile(
-                leading: const Icon(Icons.description_outlined),
-                title: Text(file.name),
-                subtitle: Text(formatBytes(file.size)),
-                trailing: IconButton(
-                  tooltip: 'Actions',
-                  onPressed: () => _showFileActions(context, ref, file),
-                  icon: const Icon(Icons.more_vert),
-                ),
-                onTap: () => _preview(context, ref, file),
-              );
+          child: view == BrowserView.grid
+              ? _buildGrid(context, ref, entries)
+              : _buildList(context, ref, entries),
+        );
+      },
+    );
+  }
+
+  Widget _buildList(
+    BuildContext context,
+    WidgetRef ref,
+    List<VaultBrowserEntry> entries,
+  ) {
+    return ListView.builder(
+      // Clearance so the floating IMPORT button never covers the last row's
+      // Actions (⋯) popup.
+      padding: const EdgeInsets.only(bottom: 88),
+      itemCount: entries.length,
+      itemBuilder: (context, index) {
+        final entry = entries[index];
+        if (entry.isFolder) {
+          final folder = entry.folder!;
+          return ListTile(
+            leading: const Icon(Icons.folder_outlined),
+            title: Text(folder.name),
+            subtitle: Text(
+              folder.childCount == 0
+                  ? 'Empty'
+                  : '${folder.childCount} '
+                        '${folder.childCount == 1 ? 'item' : 'items'}',
+            ),
+            trailing: IconButton(
+              tooltip: 'Actions',
+              onPressed: () => _showFolderActions(context, ref, folder),
+              icon: const Icon(Icons.more_vert),
+            ),
+            onTap: () => _enterFolder(ref, folder.path),
+          );
+        }
+        final file = entry.file!;
+        return ListTile(
+          leading: const Icon(Icons.description_outlined),
+          title: Text(entry.displayName),
+          subtitle: Text(formatBytes(file.size)),
+          trailing: IconButton(
+            tooltip: 'Actions',
+            onPressed: () => _showFileActions(context, ref, file),
+            icon: const Icon(Icons.more_vert),
+          ),
+          onTap: () => _preview(context, ref, file),
+        );
+      },
+    );
+  }
+
+  Widget _buildGrid(
+    BuildContext context,
+    WidgetRef ref,
+    List<VaultBrowserEntry> entries,
+  ) {
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 180,
+        mainAxisSpacing: 12,
+        crossAxisSpacing: 12,
+        childAspectRatio: 1.05,
+      ),
+      itemCount: entries.length,
+      itemBuilder: (context, index) {
+        final entry = entries[index];
+        final Widget icon = Icon(
+          entry.isFolder ? Icons.folder_outlined : Icons.description_outlined,
+          size: 40,
+        );
+        final String subtitle = entry.isFolder
+            ? (entry.folder!.childCount == 0
+                  ? 'Empty'
+                  : '${entry.folder!.childCount} '
+                        '${entry.folder!.childCount == 1 ? 'item' : 'items'}')
+            : formatBytes(entry.file!.size);
+        return Card(
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () {
+              if (entry.isFolder) {
+                _enterFolder(ref, entry.folder!.path);
+              } else {
+                _preview(context, ref, entry.file!);
+              }
             },
+            onLongPress: () {
+              if (entry.isFolder) {
+                _showFolderActions(context, ref, entry.folder!);
+              } else {
+                _showFileActions(context, ref, entry.file!);
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  icon,
+                  const SizedBox(height: 10),
+                  Text(
+                    entry.displayName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ),
+            ),
           ),
         );
       },
@@ -171,10 +324,59 @@ class VaultBrowserScreen extends ConsumerWidget {
           ListTile(
             leading: const Icon(Icons.folder_open),
             title: const Text('Import folder…'),
-            subtitle: const Text('Walk a folder, preserving structure'),
+            subtitle: const Text('Import a folder with its whole tree'),
             onTap: () {
               Navigator.of(sheetContext).pop();
               notifier.importFolder();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showFolderActions(
+    BuildContext context,
+    WidgetRef ref,
+    VaultFolder folder,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => ActionSheet(
+        title: 'FOLDER ACTIONS',
+        children: [
+          ListTile(
+            leading: const Icon(Icons.folder_open),
+            title: const Text('Open'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _enterFolder(ref, folder.path);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.edit_outlined),
+            title: const Text('Rename…'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _renameFolderDialog(context, ref, folder);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.file_download_outlined),
+            title: const Text('Extract…'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              ref
+                  .read(vaultActionsProvider.notifier)
+                  .extractFolder(folder.path);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline),
+            title: const Text('Delete…'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _deleteFolderDialog(context, ref, folder);
             },
           ),
         ],
@@ -197,7 +399,7 @@ class VaultBrowserScreen extends ConsumerWidget {
             title: const Text('Preview'),
             onTap: () {
               Navigator.of(sheetContext).pop();
-              _fileAction(context, ref, 'preview', file);
+              _preview(context, ref, file);
             },
           ),
           ListTile(
@@ -205,7 +407,7 @@ class VaultBrowserScreen extends ConsumerWidget {
             title: const Text('Extract…'),
             onTap: () {
               Navigator.of(sheetContext).pop();
-              _fileAction(context, ref, 'extract', file);
+              ref.read(vaultActionsProvider.notifier).extract(file);
             },
           ),
           ListTile(
@@ -213,7 +415,7 @@ class VaultBrowserScreen extends ConsumerWidget {
             title: const Text('Rename…'),
             onTap: () {
               Navigator.of(sheetContext).pop();
-              _fileAction(context, ref, 'rename', file);
+              _renameDialog(context, ref, file);
             },
           ),
           ListTile(
@@ -221,7 +423,7 @@ class VaultBrowserScreen extends ConsumerWidget {
             title: const Text('Delete…'),
             onTap: () {
               Navigator.of(sheetContext).pop();
-              _fileAction(context, ref, 'delete', file);
+              _deleteFile(context, ref, file);
             },
           ),
         ],
@@ -236,13 +438,150 @@ class VaultBrowserScreen extends ConsumerWidget {
     );
   }
 
+  /// True when an entry named [name] already exists in the current folder.
+  Future<bool> _nameExists(WidgetRef ref, String name) async {
+    final dir = ref.read(currentVaultFolderProvider);
+    final files = await ref.read(vaultFilesProvider.future);
+    return buildBrowserEntries(files, dir).any((e) => e.displayName == name);
+  }
+
+  String _joinDir(WidgetRef ref, String segment) {
+    final dir = ref.read(currentVaultFolderProvider);
+    return dir.isEmpty ? segment : '$dir/$segment';
+  }
+
+  Future<void> _newFolderDialog(BuildContext context, WidgetRef ref) async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('New folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Folder name'),
+          onSubmitted: (v) => Navigator.of(dialogContext).pop(v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || !context.mounted) return;
+    final trimmed = name.trim();
+    if (!isValidFolderName(trimmed)) {
+      showSnack(context, 'Invalid folder name.');
+      return;
+    }
+    if (await _nameExists(ref, trimmed)) {
+      if (!context.mounted) return;
+      showSnack(
+        context,
+        'A file or folder named "$trimmed" already exists here.',
+      );
+      return;
+    }
+    await ref.read(vaultActionsProvider.notifier).createFolder(trimmed);
+  }
+
+  Future<void> _renameFolderDialog(
+    BuildContext context,
+    WidgetRef ref,
+    VaultFolder folder,
+  ) async {
+    final controller = TextEditingController(text: folder.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Folder name'),
+          onSubmitted: (v) => Navigator.of(dialogContext).pop(v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (newName == null || newName == folder.name || !context.mounted) {
+      return;
+    }
+    final trimmed = newName.trim();
+    if (!isValidFolderName(trimmed)) {
+      showSnack(context, 'Invalid folder name.');
+      return;
+    }
+    final siblings = await _nameExists(ref, trimmed);
+    if (siblings) {
+      if (!context.mounted) return;
+      showSnack(
+        context,
+        'A file or folder named "$trimmed" already exists here.',
+      );
+      return;
+    }
+    await ref
+        .read(vaultActionsProvider.notifier)
+        .renameFolder(folder.path, trimmed);
+  }
+
+  Future<void> _deleteFolderDialog(
+    BuildContext context,
+    WidgetRef ref,
+    VaultFolder folder,
+  ) async {
+    final notifier = ref.read(vaultActionsProvider.notifier);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete folder'),
+        content: Text(
+          'Remove "${folder.name}" and its '
+          '${folder.childCount == 0 ? 'contents' : '${folder.childCount} items'} '
+          'from the vault?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await notifier.deleteFolder(folder.path);
+    }
+  }
+
   Future<void> _renameDialog(
     BuildContext context,
     WidgetRef ref,
     VaultFileInfo file,
   ) async {
     final notifier = ref.read(vaultActionsProvider.notifier);
-    final controller = TextEditingController(text: file.name);
+    final controller = TextEditingController(text: basenameOf(file.name));
     final newName = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -266,10 +605,25 @@ class VaultBrowserScreen extends ConsumerWidget {
       ),
     );
     controller.dispose();
-    if (newName == null || newName.isEmpty || newName == file.name) {
+    if (newName == null ||
+        newName.isEmpty ||
+        newName == basenameOf(file.name) ||
+        !context.mounted) {
       return;
     }
-    await notifier.rename(file.name, newName);
+    if (newName.contains('/') || newName.contains('\\')) {
+      showSnack(context, 'Renames stay within the current folder.');
+      return;
+    }
+    if (await _nameExists(ref, newName)) {
+      if (!context.mounted) return;
+      showSnack(
+        context,
+        'A file or folder named "$newName" already exists here.',
+      );
+      return;
+    }
+    await notifier.rename(file.name, _joinDir(ref, newName));
   }
 
   Future<void> _deleteFile(
@@ -282,7 +636,7 @@ class VaultBrowserScreen extends ConsumerWidget {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Delete file'),
-        content: Text('Remove "${file.name}" from the vault?'),
+        content: Text('Remove "${basenameOf(file.name)}" from the vault?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -299,28 +653,12 @@ class VaultBrowserScreen extends ConsumerWidget {
       await notifier.delete(file.name);
     }
   }
-
-  void _fileAction(
-    BuildContext context,
-    WidgetRef ref,
-    String action,
-    VaultFileInfo file,
-  ) {
-    switch (action) {
-      case 'preview':
-        _preview(context, ref, file);
-      case 'extract':
-        ref.read(vaultActionsProvider.notifier).extract(file);
-      case 'rename':
-        _renameDialog(context, ref, file);
-      case 'delete':
-        _deleteFile(context, ref, file);
-    }
-  }
 }
 
-/// Modal preview of a plaintext entry; reads the file through
-/// [vaultPreviewProvider] so the loading/error states live inside the dialog.
+/// Modal preview of an entry; reads the file through [vaultPreviewProvider] so
+/// the loading/error states live inside the dialog, then renders it by kind —
+/// images/SVG natively, text as selectable monospace, anything else as a hex
+/// dump (see `preview.dart`).
 class _PreviewDialog extends ConsumerWidget {
   const _PreviewDialog({required this.name});
 
@@ -341,7 +679,6 @@ class _PreviewDialog extends ConsumerWidget {
             child: Text('Failed to preview: ${describeEngineError(e)}'),
           ),
           data: (p) {
-            final text = utf8.decode(p.bytes, allowMalformed: true);
             final sizeLine =
                 '${formatBytes(p.fullSize)} · '
                 '${p.truncated ? 'first ${formatBytes(previewCap)} shown' : 'full file'}';
@@ -352,11 +689,9 @@ class _PreviewDialog extends ConsumerWidget {
                 Text(sizeLine, style: Theme.of(context).textTheme.bodySmall),
                 const SizedBox(height: 12),
                 Flexible(
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      text,
-                      style: const TextStyle(fontFamily: 'monospace'),
-                    ),
+                  child: _PreviewBody(
+                    kind: previewKindOf(name, p.bytes),
+                    bytes: p.bytes,
                   ),
                 ),
               ],
@@ -380,6 +715,62 @@ class _PreviewDialog extends ConsumerWidget {
           orElse: () => const <Widget>[],
         ),
       ],
+    );
+  }
+}
+
+/// Renders a file's bytes according to its [PreviewKind]: images and SVG
+/// natively (falling back to the hex view when the decoder rejects them),
+/// text as selectable monospace, everything else as a hex dump.
+class _PreviewBody extends StatelessWidget {
+  const _PreviewBody({required this.kind, required this.bytes});
+
+  final PreviewKind kind;
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (kind) {
+      case PreviewKind.image:
+        return Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => _HexView(bytes: bytes),
+        );
+      case PreviewKind.svg:
+        return SvgPicture.memory(
+          bytes,
+          fit: BoxFit.contain,
+          errorBuilder: (_, _, _) => _HexView(bytes: bytes),
+        );
+      case PreviewKind.text:
+        return SingleChildScrollView(
+          child: SelectableText(
+            decodeText(bytes),
+            style: const TextStyle(fontFamily: 'monospace'),
+          ),
+        );
+      case PreviewKind.binary:
+        return _HexView(bytes: bytes);
+    }
+  }
+}
+
+/// A monospace hex dump of the preview content (capped rows so a large read
+/// never blows up the dialog).
+class _HexView extends StatelessWidget {
+  const _HexView({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      child: SelectableText(
+        hexDump(bytes),
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+      ),
     );
   }
 }
