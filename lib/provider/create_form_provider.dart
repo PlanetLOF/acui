@@ -94,11 +94,16 @@ class CreateFormNotifier extends Notifier<CreateFormState> {
     }
   }
 
-  void generate() {
-    final pw = ref.read(passwordGeneratorProvider).generate();
-    pass.text = pw;
-    confirm.text = pw;
-    touch();
+  Future<void> generate() async {
+    if (state.busy) return;
+    try {
+      final pw = await ref.read(passwordGeneratorProvider).generate();
+      pass.text = pw;
+      confirm.text = pw;
+      touch();
+    } catch (e) {
+      state = state.copyWith(notice: '$e');
+    }
   }
 
   Future<void> create() async {

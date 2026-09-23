@@ -1,23 +1,14 @@
-import 'dart:math';
-
+import 'package:autocipher_dart/autocipher_dart.dart' as ac;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 class PasswordGenerator {
   const PasswordGenerator();
 
-  static const _chars =
-      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#\$%^&*';
-
-  /// Uses the OS CSPRNG via [Random.secure].
-  String generate([int length = 16]) {
-    final rng = Random.secure();
-    return String.fromCharCodes(
-      List.generate(
-        length,
-        (_) => _chars.codeUnitAt(rng.nextInt(_chars.length)),
-      ),
-    );
-  }
+  /// Generates a password on the native side (same CSPRNG engine as the CLI)
+  /// in the grouped `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX` format: 5 hyphen-separated
+  /// groups of 5 characters, guaranteed to contain uppercase, lowercase,
+  /// digits, and symbols.
+  Future<String> generate() => ac.generatePassword();
 }
 
 final passwordGeneratorProvider = Provider<PasswordGenerator>(

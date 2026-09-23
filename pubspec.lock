@@ -30,7 +30,7 @@ packages:
     description:
       path: dart
       ref: HEAD
-      resolved-ref: "282015b07af4773d32e234dcc2bb76de96cf0488"
+      resolved-ref: d33a7a4bda43406b737809eb21b70d800472eb55
       url: "https://github.com/PlanetLOF/autocipher"
     source: git
     version: "0.1.0"
