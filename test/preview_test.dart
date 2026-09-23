@@ -32,6 +32,35 @@ final _webp = _bytes([
   0x42,
   0x50,
 ]);
+final _mp4 = _bytes([
+  0x00,
+  0x00,
+  0x00,
+  0x20,
+  0x66,
+  0x74,
+  0x79,
+  0x70,
+  0x69,
+  0x73,
+  0x6F,
+  0x6D,
+]);
+final _webm = _bytes([0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81]);
+final _avi = _bytes([
+  0x52,
+  0x49,
+  0x46,
+  0x46,
+  0x24,
+  0x00,
+  0x00,
+  0x00,
+  0x41,
+  0x56,
+  0x49,
+  0x20,
+]);
 
 void main() {
   group('previewKindOf — magic bytes', () {
@@ -89,6 +118,96 @@ void main() {
 
     test('svg extension falls back to svg kind', () {
       expect(previewKindOf('icon.svg', _utf8('plain text')), PreviewKind.svg);
+    });
+  });
+
+  group('previewKindOf — video', () {
+    test('video magic bytes (ftyp, EBML, RIFF/AVI)', () {
+      expect(previewKindOf('clip', _mp4), PreviewKind.video);
+      expect(previewKindOf('clip', _webm), PreviewKind.video);
+      expect(previewKindOf('clip', _avi), PreviewKind.video);
+    });
+
+    test('video extensions are trusted without contradicting magic', () {
+      for (final ext in [
+        'mp4',
+        'm4v',
+        'mov',
+        'webm',
+        'mkv',
+        'avi',
+        'wmv',
+        'flv',
+        'mpg',
+        'mpeg',
+        'ogv',
+        '3gp',
+      ]) {
+        expect(
+          previewKindOf('a.$ext', _utf8('not really a video')),
+          PreviewKind.video,
+          reason: ext,
+        );
+      }
+    });
+
+    test('video magic beats a misleading extension', () {
+      expect(previewKindOf('notes.txt', _mp4), PreviewKind.video);
+      expect(previewKindOf('photo.jpg', _mp4), PreviewKind.video);
+    });
+
+    test('image magic still beats a video extension', () {
+      expect(previewKindOf('clip.mp4', _png), PreviewKind.image);
+    });
+
+    test('.ts stays text (not treated as MPEG-TS)', () {
+      expect(
+        previewKindOf('routes.ts', _utf8('export const x = 1;')),
+        PreviewKind.text,
+      );
+    });
+  });
+
+  group('isImageName / isVideoName (extension-only helpers)', () {
+    test('image helpers match the thumbnailed raster set', () {
+      for (final ext in ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico']) {
+        expect(isImageName('a.$ext'), isTrue, reason: ext);
+        expect(
+          isImageName('Photos/2024/a.${ext.toUpperCase()}'),
+          isTrue,
+          reason: ext,
+        );
+      }
+      expect(isImageName('notes.txt'), isFalse);
+      expect(isImageName('clip.mp4'), isFalse);
+      expect(isImageName('folder/.ackeep'), isFalse);
+    });
+
+    test('video helpers match the video set and nothing else', () {
+      for (final ext in [
+        'mp4',
+        'm4v',
+        'mov',
+        'webm',
+        'mkv',
+        'avi',
+        'wmv',
+        'flv',
+        'mpg',
+        'mpeg',
+        'ogv',
+        '3gp',
+      ]) {
+        expect(isVideoName('a.$ext'), isTrue, reason: ext);
+        expect(
+          isVideoName('Assets\\a.${ext.toUpperCase()}'),
+          isTrue,
+          reason: ext,
+        );
+      }
+      expect(isVideoName('routes.ts'), isFalse);
+      expect(isVideoName('photo.png'), isFalse);
+      expect(isVideoName('notes.txt'), isFalse);
     });
   });
 

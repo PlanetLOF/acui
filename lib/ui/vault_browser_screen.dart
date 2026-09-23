@@ -223,7 +223,7 @@ class VaultBrowserScreen extends ConsumerWidget {
         }
         final file = entry.file!;
         return ListTile(
-          leading: const Icon(Icons.description_outlined),
+          leading: _FileLeading(file: file),
           title: Text(entry.displayName),
           subtitle: Text(formatBytes(file.size)),
           trailing: IconButton(
@@ -253,10 +253,6 @@ class VaultBrowserScreen extends ConsumerWidget {
       itemCount: entries.length,
       itemBuilder: (context, index) {
         final entry = entries[index];
-        final Widget icon = Icon(
-          entry.isFolder ? Icons.folder_outlined : Icons.description_outlined,
-          size: 40,
-        );
         final String subtitle = entry.isFolder
             ? (entry.folder!.childCount == 0
                   ? 'Empty'
@@ -280,24 +276,29 @@ class VaultBrowserScreen extends ConsumerWidget {
                 _showFileActions(context, ref, entry.file!);
               }
             },
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  icon,
-                  const SizedBox(height: 10),
-                  Text(
-                    entry.displayName,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyMedium,
+            child: Column(
+              children: [
+                Expanded(child: _GridTileVisual(entry: entry)),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
+                  child: Column(
+                    children: [
+                      Text(
+                        entry.displayName,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         );
@@ -434,7 +435,10 @@ class VaultBrowserScreen extends ConsumerWidget {
   void _preview(BuildContext context, WidgetRef ref, VaultFileInfo file) {
     showDialog<void>(
       context: context,
-      builder: (_) => _PreviewDialog(name: file.name),
+      // Videos show only their captured-frame thumbnail — no preview dialog.
+      builder: (_) => isVideoName(file.name)
+          ? _VideoThumbDialog(name: file.name)
+          : _PreviewDialog(name: file.name),
     );
   }
 
@@ -655,10 +659,180 @@ class VaultBrowserScreen extends ConsumerWidget {
   }
 }
 
-/// Modal preview of an entry; reads the file through [vaultPreviewProvider] so
-/// the loading/error states live inside the dialog, then renders it by kind —
-/// images/SVG natively, text as selectable monospace, anything else as a hex
-/// dump (see `preview.dart`).
+/// The top visual zone of a grid tile: a real raster thumbnail for image
+/// files, a movie icon with a play badge for videos, and the plain type icon
+/// for folders and other files. The zone keeps a consistent aspect ratio so
+/// tiles stay uniform regardless of the source image's proportions.
+class _GridTileVisual extends ConsumerWidget {
+  const _GridTileVisual({required this.entry});
+
+  final VaultBrowserEntry entry;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    return ColoredBox(
+      color: scheme.surfaceContainerHighest,
+      child: SizedBox.expand(child: _buildVisual(context, ref)),
+    );
+  }
+
+  Widget _buildVisual(BuildContext context, WidgetRef ref) {
+    if (entry.isFolder) {
+      return const Center(child: Icon(Icons.folder_outlined, size: 40));
+    }
+    final file = entry.file!;
+    if (isVideoName(file.name)) {
+      return ref
+          .watch(vaultVideoThumbProvider(file.name))
+          .when(
+            loading: () => const Stack(
+              fit: StackFit.expand,
+              children: [Center(child: Icon(Icons.movie_outlined, size: 40))],
+            ),
+            error: (_, _) => const Stack(
+              fit: StackFit.expand,
+              children: [Center(child: Icon(Icons.movie_outlined, size: 40))],
+            ),
+            data: (thumb) => Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.memory(
+                  thumb.frameBytes,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, _, _) =>
+                      const Center(child: Icon(Icons.movie_outlined, size: 40)),
+                ),
+                const Center(
+                  child: Icon(
+                    Icons.play_circle_fill,
+                    size: 34,
+                    color: Colors.white70,
+                    shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
+                  ),
+                ),
+              ],
+            ),
+          );
+    }
+    if (isImageName(file.name)) {
+      const placeholder = Center(child: Icon(Icons.image_outlined, size: 32));
+      return ref
+          .watch(vaultImageThumbProvider(file.name))
+          .when(
+            loading: () => placeholder,
+            error: (_, _) => placeholder,
+            data: (bytes) => Image.memory(
+              bytes,
+              fit: BoxFit.cover,
+              cacheWidth: 220,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => placeholder,
+            ),
+          );
+    }
+    return const Center(child: Icon(Icons.description_outlined, size: 40));
+  }
+}
+
+/// A 40×40 rounded raster thumbnail for image rows in list view; the generic
+/// file icon otherwise.
+class _FileLeading extends ConsumerWidget {
+  const _FileLeading({required this.file});
+
+  final VaultFileInfo file;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (isVideoName(file.name)) {
+      return ref
+          .watch(vaultVideoThumbProvider(file.name))
+          .when(
+            loading: () => const Icon(Icons.movie_outlined),
+            error: (_, _) => const Icon(Icons.movie_outlined),
+            data: (thumb) => ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.memory(
+                thumb.frameBytes,
+                width: 40,
+                height: 40,
+                fit: BoxFit.cover,
+                cacheWidth: 80,
+                gaplessPlayback: true,
+                errorBuilder: (_, _, _) => const Icon(Icons.movie_outlined),
+              ),
+            ),
+          );
+    }
+    if (!isImageName(file.name)) {
+      return const Icon(Icons.description_outlined);
+    }
+    const placeholder = Icon(Icons.description_outlined);
+    return ref
+        .watch(vaultImageThumbProvider(file.name))
+        .when(
+          loading: () => placeholder,
+          error: (_, _) => placeholder,
+          data: (bytes) => ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: Image.memory(
+              bytes,
+              width: 40,
+              height: 40,
+              fit: BoxFit.cover,
+              cacheWidth: 80,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => placeholder,
+            ),
+          ),
+        );
+  }
+}
+
+/// A video's captured frame shown large. Deliberately minimal: no playback and
+/// no preview plumbing — just the thumbnail, sized within the dialog.
+class _VideoThumbDialog extends ConsumerWidget {
+  const _VideoThumbDialog({required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final thumb = ref.watch(vaultVideoThumbProvider(name));
+    return AlertDialog(
+      title: Text(basenameOf(name)),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 400),
+        child: thumb.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (_, _) => const Center(
+            child: Text('No thumbnail could be generated for this video.'),
+          ),
+          data: (p) => Image.memory(
+            p.frameBytes,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) =>
+                const Center(child: Text('Unsupported frame format.')),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Modal preview of a non-video entry; reads the file through
+/// [vaultPreviewProvider] so the loading/error states live inside the dialog,
+/// then renders it by kind — images/SVG natively, text as selectable
+/// monospace, anything else as a hex dump (see `preview.dart`). Videos open
+/// [_VideoThumbDialog] instead.
 class _PreviewDialog extends ConsumerWidget {
   const _PreviewDialog({required this.name});
 
@@ -743,6 +917,19 @@ class _PreviewBody extends StatelessWidget {
           bytes,
           fit: BoxFit.contain,
           errorBuilder: (_, _, _) => _HexView(bytes: bytes),
+        );
+      case PreviewKind.video:
+        return Stack(
+          alignment: Alignment.center,
+          children: [
+            Image.memory(
+              bytes,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => _HexView(bytes: bytes),
+            ),
+            const Icon(Icons.play_circle_fill, size: 56, color: Colors.white70),
+          ],
         );
       case PreviewKind.text:
         return SingleChildScrollView(

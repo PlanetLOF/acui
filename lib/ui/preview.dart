@@ -5,6 +5,8 @@
 // bytes of content:
 //
 //  * raster images and SVG render natively (`Image.memory` / `SvgPicture.memory`),
+//  * video files render as a captured first-frame thumbnail (see the
+//    `vaultVideoThumbProvider` in `../provider/browser_provider.dart`),
 //  * anything that decodes cleanly as UTF-8 / UTF-16 renders as selectable text,
 //  * everything else falls back to a hex dump instead of mojibake.
 //
@@ -16,21 +18,47 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 /// How preview content should be rendered in the preview dialog.
-enum PreviewKind { image, svg, text, binary }
+enum PreviewKind { image, svg, video, text, binary }
 
-/// Lowercased file suffix (no leading dot) → native preview kind.
-const Map<String, PreviewKind> _extensionKinds = {
-  // Raster images rendered with `Image.memory`.
-  'png': PreviewKind.image,
-  'jpg': PreviewKind.image,
-  'jpeg': PreviewKind.image,
-  'gif': PreviewKind.image,
-  'webp': PreviewKind.image,
-  'bmp': PreviewKind.image,
-  'ico': PreviewKind.image,
-  // Vector images rendered with `SvgPicture.memory`.
-  'svg': PreviewKind.svg,
+/// Raster-image suffixes that render with `Image.memory` and can be
+/// thumbnailed inline in the browser grid/list.
+const Set<String> _imageExtensions = {
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'ico',
 };
+
+/// Video suffixes: previewed as a captured-frame thumbnail in the dialog.
+/// `.ts` (MPEG-TS) is intentionally absent so TypeScript sources keep their
+/// text preview instead of being misdetected as video.
+const Set<String> _videoExtensions = {
+  'mp4',
+  'm4v',
+  'mov',
+  'webm',
+  'mkv',
+  'avi',
+  'wmv',
+  'flv',
+  'mpg',
+  'mpeg',
+  'ogv',
+  '3gp',
+};
+
+/// Lowercased file suffix (no leading dot) → native preview kind, or `null`
+/// when the extension carries no content hint. The sets are kept as plain
+/// constants; membership checks replace the old lookup map.
+PreviewKind? _extensionKind(String ext) {
+  if (_imageExtensions.contains(ext)) return PreviewKind.image;
+  if (_videoExtensions.contains(ext)) return PreviewKind.video;
+  if (ext == 'svg') return PreviewKind.svg;
+  return null;
+}
 
 /// Suffixes that are never plain text; these always render as a hex dump.
 /// PDF pages are not rendered by the preview dialog yet, so `.pdf` (which a
@@ -51,11 +79,19 @@ PreviewKind previewKindOf(String name, Uint8List bytes) {
   final byMagic = _magicKind(head);
   if (byMagic != null) return byMagic;
   final ext = _extensionOf(name);
-  final byExtension = _extensionKinds[ext];
+  final byExtension = _extensionKind(ext);
   if (byExtension != null) return byExtension;
   if (_binaryExtensions.contains(ext)) return PreviewKind.binary;
   return _looksLikeText(head) ? PreviewKind.text : PreviewKind.binary;
 }
+
+/// Whether [name]'s extension is a raster image that can be thumbnailed in
+/// the browser grid/list (content is not read — extension-only).
+bool isImageName(String name) => _imageExtensions.contains(_extensionOf(name));
+
+/// Whether [name]'s extension is a video type (extension-only; the dialog
+/// snapshots a frame via `vaultVideoThumbProvider`).
+bool isVideoName(String name) => _videoExtensions.contains(_extensionOf(name));
 
 /// The last lowercase suffix of [name] (e.g. `a/b/Photo.JPG` → `jpg`), or
 /// `''` when there is none. Names use `/` separators inside the vault.
@@ -105,6 +141,35 @@ PreviewKind? _magicKind(Uint8List head) {
       head[10] == 0x42 &&
       head[11] == 0x50) {
     return PreviewKind.image;
+  }
+  // MP4 / M4V / MOV / 3GP: an `ftyp` box at offset 4.
+  if (head.length >= 8 &&
+      head[4] == 0x66 &&
+      head[5] == 0x74 &&
+      head[6] == 0x79 &&
+      head[7] == 0x70) {
+    return PreviewKind.video;
+  }
+  // WebM / Matroska (.mkv): the EBML header magic.
+  if (head.length >= 4 &&
+      head[0] == 0x1A &&
+      head[1] == 0x45 &&
+      head[2] == 0xDF &&
+      head[3] == 0xA3) {
+    return PreviewKind.video;
+  }
+  // AVI: a "RIFF" chunk whose form type is "AVI " (distinct from WebP's
+  // "WEBP" or WAV's "WAVE").
+  if (head.length >= 12 &&
+      head[0] == 0x52 &&
+      head[1] == 0x49 &&
+      head[2] == 0x46 &&
+      head[3] == 0x46 &&
+      head[8] == 0x41 &&
+      head[9] == 0x56 &&
+      head[10] == 0x49 &&
+      head[11] == 0x20) {
+    return PreviewKind.video;
   }
   // SVG: an XML declaration or a bare <svg… root (tolerating leading
   // whitespace so indented documents aren't missed).

@@ -5,8 +5,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:acui/ui/vault_model.dart';
 
-List<VaultFileInfo> filesOf(List<String> names) =>
-    [for (final n in names) VaultFileInfo(n, n.length)];
+List<VaultFileInfo> filesOf(List<String> names) => [
+  for (final n in names) VaultFileInfo(n, n.length),
+];
 
 void main() {
   group('folder marker helpers', () {
@@ -66,7 +67,10 @@ void main() {
       ]);
       expect(entries[0].isFolder, isTrue);
       expect(entries[0].folder!.path, 'Beta');
-      expect(entries[1].folder!.childCount, 2); // Notes/todo.txt + Notes/2024/a.txt
+      expect(
+        entries[1].folder!.childCount,
+        2,
+      ); // Notes/todo.txt + Notes/2024/a.txt
       expect(entries[2].isFolder, isFalse);
     });
 
@@ -90,7 +94,11 @@ void main() {
         'other.txt',
       ]);
       final entries = buildBrowserEntries(files, 'Notes');
-      expect(entries.map((e) => e.displayName).toList(), ['2024', 'readme.md', 'todo.txt']);
+      expect(entries.map((e) => e.displayName).toList(), [
+        '2024',
+        'readme.md',
+        'todo.txt',
+      ]);
       expect(entries[0].folder!.path, 'Notes/2024');
       expect(entries[0].folder!.childCount, 1);
       expect(entries[2].file!.name, 'Notes/todo.txt');
@@ -99,16 +107,14 @@ void main() {
     test('markers never become file rows', () {
       final files = filesOf(['a/b/.ackeep', 'a/file.txt']);
       final entries = buildBrowserEntries(files, 'a');
-      expect(entries.any((e) => e.isFolder == false && e.displayName == '.ackeep'),
-          isFalse);
+      expect(
+        entries.any((e) => e.isFolder == false && e.displayName == '.ackeep'),
+        isFalse,
+      );
     });
 
     test('nested folder counts include descendants', () {
-      final files = filesOf([
-        'p/b/c1.txt',
-        'p/b/c2.txt',
-        'p/x.txt',
-      ]);
+      final files = filesOf(['p/b/c1.txt', 'p/b/c2.txt', 'p/x.txt']);
       final entries = buildBrowserEntries(files, 'p');
       expect(entries[0].folder!.name, 'b');
       expect(entries[0].folder!.childCount, 2);

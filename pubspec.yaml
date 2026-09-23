@@ -17,6 +17,13 @@ dependencies:
   flutter_svg: ^2.3.0
   file_selector: ^1.1.0
   shared_preferences: ^2.3.0
+  # Video-frame snapshots (thumbnails in the browser + a thumbnail-only dialog,
+  # no playback UI). media_kit_video's VideoController is what actually enables
+  # mpv video decoding (vid=auto); the bare media_kit Player runs with vid=no.
+  # Bundles mpv on Windows/macOS; Linux needs a system libmpv (see README).
+  media_kit: ^1.2.6
+  media_kit_video: ^1.3.1
+  media_kit_libs_video: ^1.0.7
 
 dev_dependencies:
   flutter_test:
