@@ -435,9 +435,10 @@ class VaultBrowserScreen extends ConsumerWidget {
   void _preview(BuildContext context, WidgetRef ref, VaultFileInfo file) {
     showDialog<void>(
       context: context,
-      // Videos show only their captured-frame thumbnail — no preview dialog.
+      // With media_kit removed there is no video decode/preview, so videos
+      // open a placeholder dialog instead of _PreviewDialog.
       builder: (_) => isVideoName(file.name)
-          ? _VideoThumbDialog(name: file.name)
+          ? _VideoPlaceholderDialog(file: file)
           : _PreviewDialog(name: file.name),
     );
   }
@@ -683,38 +684,7 @@ class _GridTileVisual extends ConsumerWidget {
     }
     final file = entry.file!;
     if (isVideoName(file.name)) {
-      return ref
-          .watch(vaultVideoThumbProvider(file.name))
-          .when(
-            loading: () => const Stack(
-              fit: StackFit.expand,
-              children: [Center(child: Icon(Icons.movie_outlined, size: 40))],
-            ),
-            error: (_, _) => const Stack(
-              fit: StackFit.expand,
-              children: [Center(child: Icon(Icons.movie_outlined, size: 40))],
-            ),
-            data: (thumb) => Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.memory(
-                  thumb.frameBytes,
-                  fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, _, _) =>
-                      const Center(child: Icon(Icons.movie_outlined, size: 40)),
-                ),
-                const Center(
-                  child: Icon(
-                    Icons.play_circle_fill,
-                    size: 34,
-                    color: Colors.white70,
-                    shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
-                  ),
-                ),
-              ],
-            ),
-          );
+      return const Center(child: Icon(Icons.movie_outlined, size: 40));
     }
     if (isImageName(file.name)) {
       const placeholder = Center(child: Icon(Icons.image_outlined, size: 32));
@@ -746,24 +716,7 @@ class _FileLeading extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (isVideoName(file.name)) {
-      return ref
-          .watch(vaultVideoThumbProvider(file.name))
-          .when(
-            loading: () => const Icon(Icons.movie_outlined),
-            error: (_, _) => const Icon(Icons.movie_outlined),
-            data: (thumb) => ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: Image.memory(
-                thumb.frameBytes,
-                width: 40,
-                height: 40,
-                fit: BoxFit.cover,
-                cacheWidth: 80,
-                gaplessPlayback: true,
-                errorBuilder: (_, _, _) => const Icon(Icons.movie_outlined),
-              ),
-            ),
-          );
+      return const Icon(Icons.movie_outlined);
     }
     if (!isImageName(file.name)) {
       return const Icon(Icons.description_outlined);
@@ -790,33 +743,31 @@ class _FileLeading extends ConsumerWidget {
   }
 }
 
-/// A video's captured frame shown large. Deliberately minimal: no playback and
-/// no preview plumbing — just the thumbnail, sized within the dialog.
-class _VideoThumbDialog extends ConsumerWidget {
-  const _VideoThumbDialog({required this.name});
+/// What opens when a video is tapped. media_kit was removed, so there is no
+/// decoder or preview for videos anymore — the dialog just identifies the
+/// file and points at Extract. Deliberately minimal and read-free.
+class _VideoPlaceholderDialog extends StatelessWidget {
+  const _VideoPlaceholderDialog({required this.file});
 
-  final String name;
+  final VaultFileInfo file;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final thumb = ref.watch(vaultVideoThumbProvider(name));
+  Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(basenameOf(name)),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 400),
-        child: thumb.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (_, _) => const Center(
-            child: Text('No thumbnail could be generated for this video.'),
+      title: Text(basenameOf(file.name)),
+      content: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.movie_outlined, size: 40),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(
+              '${formatBytes(file.size)}\n'
+              'Video preview is not available — use Extract to view it.',
+            ),
           ),
-          data: (p) => Image.memory(
-            p.frameBytes,
-            fit: BoxFit.contain,
-            gaplessPlayback: true,
-            errorBuilder: (_, _, _) =>
-                const Center(child: Text('Unsupported frame format.')),
-          ),
-        ),
+        ],
       ),
       actions: [
         TextButton(
@@ -832,7 +783,7 @@ class _VideoThumbDialog extends ConsumerWidget {
 /// [vaultPreviewProvider] so the loading/error states live inside the dialog,
 /// then renders it by kind — images/SVG natively, text as selectable
 /// monospace, anything else as a hex dump (see `preview.dart`). Videos open
-/// [_VideoThumbDialog] instead.
+/// [_VideoPlaceholderDialog] instead.
 class _PreviewDialog extends ConsumerWidget {
   const _PreviewDialog({required this.name});
 

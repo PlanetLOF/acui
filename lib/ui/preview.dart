@@ -5,8 +5,8 @@
 // bytes of content:
 //
 //  * raster images and SVG render natively (`Image.memory` / `SvgPicture.memory`),
-//  * video files render as a captured first-frame thumbnail (see the
-//    `vaultVideoThumbProvider` in `../provider/browser_provider.dart`),
+//  * video files are no longer decoded — they show a generic movie icon in the
+//    browser and a read-free placeholder dialog on tap,
 //  * anything that decodes cleanly as UTF-8 / UTF-16 renders as selectable text,
 //  * everything else falls back to a hex dump instead of mojibake.
 //
@@ -89,8 +89,9 @@ PreviewKind previewKindOf(String name, Uint8List bytes) {
 /// the browser grid/list (content is not read — extension-only).
 bool isImageName(String name) => _imageExtensions.contains(_extensionOf(name));
 
-/// Whether [name]'s extension is a video type (extension-only; the dialog
-/// snapshots a frame via `vaultVideoThumbProvider`).
+/// Whether [name]'s extension is a video type (extension-only). Videos are no
+/// longer decoded/previewed; the browser shows them with a generic movie icon
+/// and a read-free placeholder dialog.
 bool isVideoName(String name) => _videoExtensions.contains(_extensionOf(name));
 
 /// The last lowercase suffix of [name] (e.g. `a/b/Photo.JPG` → `jpg`), or

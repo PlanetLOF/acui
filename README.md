@@ -18,11 +18,9 @@ flutter_rust_bridge, no cargokit, no gRPC, no sidecar process.
   vault browser (import/extract/preview/rename/delete), and settings (change
   password, compact, remirror, container info).
 - `lib/ui/preview.dart` — pure-Dart preview-kind detection (image / SVG /
-  video / text / binary), plus the image/`video`-name helpers that drive
-  thumbnails. Raster files show real thumbnails in the grid & list views;
-  video files show a captured-frame thumbnail in the grid/list and a
-  thumbnail-only click dialog (`media_kit` + `media_kit_video`, bundled mpv —
-  no playback UI).
+  video / text / binary), plus the image/video-name helpers that drive the
+  grid & list thumbnails. Raster files show real thumbnails; video files show
+  a generic movie icon (video decoding was removed along with media_kit).
 
 ## Repository split
 
@@ -104,20 +102,6 @@ Bundling the `file_selector` plugin requires
 [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development)
 (symlink support): `start ms-settings:developers`. UI plugin bundling is the
 only thing that needs it — `flutter test` do not.
-
-## Linux note: video thumbnails
-
-Video thumbnails use `media_kit`/`media_kit_video`, which drive the bundled
-**mpv** engine. Windows and macOS bundle the engine automatically; on GNU/Linux
-you need the system libraries (mpv ships no bundled libs there) plus a working
-OpenGL/EGL stack for `media_kit_video`'s render context:
-
-```bash
-sudo apt install libmpv-dev mpv
-```
-
-Without them, video files just keep the generic file icon — everything else
-keeps working.
 
 ## License
 
