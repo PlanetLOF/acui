@@ -88,8 +88,9 @@ class FileService {
     return loc.path;
   }
 
-  /// Remove a cached cloud vault from disk: the `.ac` file plus any
-  /// `.mirror.*` sidecars next to it. Never touches the remote.
+  /// Remove a cached cloud vault from disk: the `.ac` file plus the
+  /// sidecars next to it — `.mirror.*` files and stale rclone `.partial`
+  /// temps of an interrupted transfer. Never touches the remote.
   Future<void> deleteVaultCache(String cachePath) async {
     final file = File(cachePath);
     try {
@@ -97,17 +98,33 @@ class FileService {
     } catch (_) {
       // Best effort — a file that refuses to die is better than data loss.
     }
+    await _deleteSidecars(file);
+  }
+
+  /// Drop rclone download leftovers for a cache target (`<name>.*.partial`).
+  ///
+  /// rclone writes a download as a temporary `.partial` file and renames it
+  /// to the real name only when the transfer completes; an interrupted
+  /// download orphans the temp. Call before a download starts and again
+  /// after a failed one so the cache never grows stale temps.
+  Future<void> cleanDownloadLeftovers(String cachePath) async {
+    await _deleteSidecars(File(cachePath), partialOnly: true);
+  }
+
+  Future<void> _deleteSidecars(File file, {bool partialOnly = false}) async {
     final dir = file.parent;
     if (!await dir.exists()) return;
     final base = file.uri.pathSegments.last;
     await for (final entity in dir.list()) {
       if (entity is! File) continue;
       final name = entity.uri.pathSegments.last;
-      if (name.startsWith('$base.mirror.')) {
-        try {
-          await entity.delete();
-        } catch (_) {}
+      if (!name.startsWith('$base.')) continue;
+      if (partialOnly ? !name.endsWith('.partial') : !(name.contains('.mirror.') || name.endsWith('.partial'))) {
+        continue;
       }
+      try {
+        await entity.delete();
+      } catch (_) {}
     }
   }
 }

@@ -74,7 +74,7 @@ void main() {
   });
 
   group('cache purge', () {
-    test('deleteVaultCache removes the vault and its mirror sidecars only', () async {
+    test('deleteVaultCache removes the vault, sidecars, and stale partials', () async {
       final dir = await Directory.systemTemp.createTemp('acui_cache_test');
       addTearDown(() async {
         if (await dir.exists()) await dir.delete(recursive: true);
@@ -88,6 +88,10 @@ void main() {
         '${dir.path}${Platform.pathSeparator}v.ac.mirror.metadata',
       );
       await metadata.writeAsString('m');
+      final partial = File(
+        '${dir.path}${Platform.pathSeparator}v.ac.8451a416.partial',
+      );
+      await partial.writeAsString('');
       final other = File('${dir.path}${Platform.pathSeparator}other.ac');
       await other.writeAsString('o');
       final otherSide = File(
@@ -100,9 +104,35 @@ void main() {
       expect(await vault.exists(), isFalse);
       expect(await header.exists(), isFalse);
       expect(await metadata.exists(), isFalse);
+      expect(await partial.exists(), isFalse);
       // Sibling vaults are untouched.
       expect(await other.exists(), isTrue);
       expect(await otherSide.exists(), isTrue);
+    });
+
+    test('cleanDownloadLeftovers drops only that target partials', () async {
+      final dir = await Directory.systemTemp.createTemp('acui_cache_test');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+
+      final vault = File('${dir.path}${Platform.pathSeparator}v.ac');
+      await vault.writeAsString('x');
+      final stale = File(
+        '${dir.path}${Platform.pathSeparator}v.ac.8451a416.partial',
+      );
+      await stale.writeAsString('');
+      final otherPartial = File(
+        '${dir.path}${Platform.pathSeparator}other.ac.aabbccdd.partial',
+      );
+      await otherPartial.writeAsString('');
+
+      await const FileService().cleanDownloadLeftovers(vault.path);
+
+      expect(await stale.exists(), isFalse);
+      // The target itself and other vaults' partials survive.
+      expect(await vault.exists(), isTrue);
+      expect(await otherPartial.exists(), isTrue);
     });
   });
 }

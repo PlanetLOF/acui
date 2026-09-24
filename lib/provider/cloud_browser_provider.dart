@@ -145,8 +145,15 @@ class CloudBrowserNotifier extends Notifier<CloudBrowserState> {
     final cachePath = await cachePathFor(entry);
     state = state.copyWith(busy: true, notice: null);
     try {
+      // Drop temps of a previously interrupted download of this vault.
+      await ref.read(fileServiceProvider).cleanDownloadLeftovers(cachePath);
       await ref.read(rcloneServiceProvider).download(remotePath, cachePath);
       return cachePath;
+    } catch (e) {
+      // rclone orphans a `<name>.*.partial` temp when a download dies —
+      // remove it so the cache never keeps zero-byte leftovers.
+      await ref.read(fileServiceProvider).cleanDownloadLeftovers(cachePath);
+      rethrow;
     } finally {
       state = state.copyWith(busy: false);
     }
@@ -165,6 +172,7 @@ class CloudBrowserNotifier extends Notifier<CloudBrowserState> {
       await ref.read(rcloneServiceProvider).download(remotePath, loc);
       _notice('Saved to $loc');
     } catch (e) {
+      await ref.read(fileServiceProvider).cleanDownloadLeftovers(loc);
       _notice('Download failed: $e');
     } finally {
       state = state.copyWith(busy: false);
