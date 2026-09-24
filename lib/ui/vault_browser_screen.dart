@@ -455,6 +455,18 @@ class VaultBrowserScreen extends ConsumerWidget {
     return dir.isEmpty ? segment : '$dir/$segment';
   }
 
+  /// Submit a dialog's text field with [value]. The pop is deferred one frame:
+  /// popping synchronously inside `TextField.onSubmitted` (which runs inside
+  /// the IME/editing callback) tears the dialog subtree down while
+  /// `EditableText` is still mid-edit-cycle, which trips framework assertions
+  /// ("Tried to build dirty widget in the wrong build scope" / the
+  /// `_dependents.isEmpty` assert in `InheritedElement.debugDeactivated`).
+  void _submitDialog(BuildContext dialogContext, String value) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (dialogContext.mounted) Navigator.of(dialogContext).pop(value);
+    });
+  }
+
   Future<void> _newFolderDialog(BuildContext context, WidgetRef ref) async {
     final controller = TextEditingController();
     final name = await showDialog<String>(
@@ -465,7 +477,7 @@ class VaultBrowserScreen extends ConsumerWidget {
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(labelText: 'Folder name'),
-          onSubmitted: (v) => Navigator.of(dialogContext).pop(v),
+          onSubmitted: (v) => _submitDialog(dialogContext, v),
         ),
         actions: [
           TextButton(
@@ -511,7 +523,7 @@ class VaultBrowserScreen extends ConsumerWidget {
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(labelText: 'Folder name'),
-          onSubmitted: (v) => Navigator.of(dialogContext).pop(v),
+          onSubmitted: (v) => _submitDialog(dialogContext, v),
         ),
         actions: [
           TextButton(
@@ -595,7 +607,7 @@ class VaultBrowserScreen extends ConsumerWidget {
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(labelText: 'Stored name'),
-          onSubmitted: (v) => Navigator.of(dialogContext).pop(v),
+          onSubmitted: (v) => _submitDialog(dialogContext, v),
         ),
         actions: [
           TextButton(
