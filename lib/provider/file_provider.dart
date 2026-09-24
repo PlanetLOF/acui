@@ -87,6 +87,29 @@ class FileService {
     await File(loc.path).writeAsBytes(bytes);
     return loc.path;
   }
+
+  /// Remove a cached cloud vault from disk: the `.ac` file plus any
+  /// `.mirror.*` sidecars next to it. Never touches the remote.
+  Future<void> deleteVaultCache(String cachePath) async {
+    final file = File(cachePath);
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // Best effort — a file that refuses to die is better than data loss.
+    }
+    final dir = file.parent;
+    if (!await dir.exists()) return;
+    final base = file.uri.pathSegments.last;
+    await for (final entity in dir.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (name.startsWith('$base.mirror.')) {
+        try {
+          await entity.delete();
+        } catch (_) {}
+      }
+    }
+  }
 }
 
 final fileServiceProvider = Provider<FileService>((ref) => const FileService());

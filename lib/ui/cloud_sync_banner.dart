@@ -33,6 +33,8 @@ class CloudSyncBanner extends ConsumerWidget {
       status =
           'The cloud copy changed since you opened it — resolve the '
           'conflict before syncing.';
+    } else if (sync.offline) {
+      status = "Offline — changes will sync when you're back online.";
     } else if (sync.dirty) {
       status = 'Changes pending…';
     } else if (sync.lastSync != null) {
@@ -54,6 +56,8 @@ class CloudSyncBanner extends ConsumerWidget {
             Icon(
               sync.conflict
                   ? Icons.error_outline
+                  : sync.offline
+                  ? Icons.cloud_off_outlined
                   : sync.dirty
                   ? Icons.cloud_upload_outlined
                   : Icons.cloud_done_outlined,

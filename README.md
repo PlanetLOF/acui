@@ -14,8 +14,9 @@ flutter_rust_bridge, no cargokit, no gRPC, no sidecar process.
   inside the wrapper, so they never block the UI.
 - `lib/provider/` — riverpod state: the open `Vault` (`vaultSessionProvider`),
   connection-tab selection, file dialogs, random-password generation. Cloud
-  support lives in `rclone_provider.dart` (rclone bridge), the cloud browser
-  and the cloud-sync notifier.
+  support lives in `rclone_provider.dart` (rclone bridge), the cloud browser,
+  the cloud-sync notifier, and the cache-pin notifier (online-only /
+  available-offline per vault).
 - `lib/ui/` — provider-tab entry (FTP/FTPS, SFTP/SSH, cloud, local
   create/open), the vault browser (import/extract/preview/rename/delete), the
   cloud-sync banner, and settings (change password, compact, remirror,
@@ -109,10 +110,27 @@ remotes exist in the user's `rclone.conf`.
   compact / change password / remirror) a debounced (2 s) upload pushes the
   updated `.ac` blob back to the cloud; the lock flow also offers
   **Upload & lock**.
-- **Conflict guard** — before any upload the app stats the remote and, if it
-  changed since it was opened (size or modtime), refuses to silently
-  overwrite: you choose **Overwrite cloud** / **Reload from cloud** / make a
-  local copy first. A conflict can never be clobbered by an auto-sync.
+- **Conflict guard** — before any upload the app stats the remote and, if its
+  **size** changed since it was opened, refuses to silently overwrite: you
+  choose **Overwrite cloud** / **Reload from cloud** / make a local copy
+  first. A conflict can never be clobbered by an auto-sync. Modtime-only
+  drift at an identical size is Terabox-style metadata churn around the
+  upload and is adopted, not blocked.
+- **Cache pinning (online-only vs available offline)** — every vault carries a
+  Dropbox-style pin, toggled from the CLOUD tab row menu or the vault settings
+  sheet:
+  - **Online only** (default) — no disk footprint. Opening downloads the
+    vault, and locking purges the cache copy again (unless edits never
+    uploaded — then the copy is kept and you're told, never silently deleted).
+  - **Available offline** — a copy stays in the cache and the vault opens
+    straight from disk, with no internet needed. Offline edits are saved and
+    queue up; the banner shows "Offline — changes will sync when you're back
+    online", and they upload on the next manual **SYNC NOW**, the next edit,
+    or the next cache open (rclone skips when the bytes are already
+    identical).
+  - The pin record also stores the vault's last-known remote fingerprint, so
+    the conflict guard works even when a vault is opened from cache without a
+    fresh listing.
 
 ## Run
 
@@ -130,6 +148,8 @@ flutter test
 
 - `test/widget_test.dart` — provider-tab shell smoke test (renders and
   switches between the FTP/FTPS, SFTP/SSH, cloud, create, and open tabs).
+- `test/cloud_cache_test.dart` — cache-pin store (defaults, persistence,
+  fingerprint-vs-mode) and the cache-purge helper.
 - Engine coverage lives in the monorepo's `dart/test/` (wire-format parity +
   a live lifecycle through the real ABI).
 

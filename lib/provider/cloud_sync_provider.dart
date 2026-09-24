@@ -15,6 +15,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'cloud_pin_provider.dart';
 import 'rclone_provider.dart';
 import 'session_provider.dart';
 
@@ -25,6 +26,7 @@ class CloudSyncState {
     this.busy = false,
     this.dirty = false,
     this.conflict = false,
+    this.offline = false,
     this.lastSync,
     this.notice,
   });
@@ -37,6 +39,10 @@ class CloudSyncState {
   /// The remote changed since the baseline — uploading would clobber it.
   final bool conflict;
 
+  /// The last sync failed because the network was unreachable; edits are
+  /// queued ("changes will sync when you're back online").
+  final bool offline;
+
   final DateTime? lastSync;
 
   /// Transient user-facing message (surfaced as a snackbar by listeners).
@@ -46,12 +52,14 @@ class CloudSyncState {
     bool? busy,
     bool? dirty,
     bool? conflict,
+    bool? offline,
     DateTime? lastSync,
     String? notice,
   }) => CloudSyncState(
     busy: busy ?? this.busy,
     dirty: dirty ?? this.dirty,
     conflict: conflict ?? this.conflict,
+    offline: offline ?? this.offline,
     lastSync: lastSync ?? this.lastSync,
     notice: notice ?? this.notice,
   );
@@ -86,7 +94,12 @@ class CloudSyncNotifier extends Notifier<CloudSyncState> {
     final origin = _origin;
     if (origin == null) return;
     _debounce?.cancel();
-    state = state.copyWith(dirty: true, conflict: false, notice: null);
+    state = state.copyWith(
+      dirty: true,
+      conflict: false,
+      offline: false,
+      notice: null,
+    );
     _debounce = Timer(autoSyncDebounce, syncNow);
   }
 
@@ -139,6 +152,11 @@ class CloudSyncNotifier extends Notifier<CloudSyncState> {
       final after = await service.findRemoteEntry(origin.remotePath);
       _baseline = after == null ? null : RemoteState(after.size, after.modTime);
       _baselineKey = origin.remotePath;
+      if (after != null) {
+        await ref
+            .read(cloudPinProvider.notifier)
+            .recordSync(origin.remotePath, after.size, after.modTime);
+      }
       state = CloudSyncState(
         lastSync: DateTime.now(),
         notice: 'Synced to ${origin.remotePath}',
@@ -179,6 +197,16 @@ class CloudSyncNotifier extends Notifier<CloudSyncState> {
       await ref
           .read(rcloneServiceProvider)
           .download(origin.remotePath, origin.cachePath);
+      // The remote is now the local cache's content — refresh the stored
+      // fingerprint so a later open-from-cache conflict check is correct.
+      final after = await ref
+          .read(rcloneServiceProvider)
+          .findRemoteEntry(origin.remotePath);
+      if (after != null) {
+        await ref
+            .read(cloudPinProvider.notifier)
+            .recordSync(origin.remotePath, after.size, after.modTime);
+      }
       state = const CloudSyncState(
         notice: 'Downloaded the remote copy; local edits were discarded.',
       );
@@ -190,7 +218,30 @@ class CloudSyncNotifier extends Notifier<CloudSyncState> {
   }
 
   void _fail(String message) {
-    state = state.copyWith(busy: false, notice: message);
+    final offline = _soundsOffline(message);
+    state = state.copyWith(
+      busy: false,
+      offline: offline,
+      notice: offline
+          ? "Offline — changes will sync when you're back online."
+          : message,
+    );
+  }
+
+  /// Best-effort "the network is gone" detection from an rclone error
+  /// message. Deliberately conservative: unknown errors surface as-is.
+  static bool _soundsOffline(String message) {
+    final m = message.toLowerCase();
+    return m.contains('network') ||
+        m.contains('unreachable') ||
+        m.contains('refused') ||
+        m.contains('timeout') ||
+        m.contains('timed out') ||
+        m.contains('no route') ||
+        m.contains('dns') ||
+        m.contains('offline') ||
+        m.contains('connection reset') ||
+        m.contains('couldn\'t connect');
   }
 }
 

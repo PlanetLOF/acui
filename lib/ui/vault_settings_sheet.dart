@@ -10,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../provider/browser_provider.dart';
 import '../provider/change_password_form_provider.dart';
+import '../provider/cloud_pin_provider.dart';
+import '../provider/session_provider.dart';
 import 'common/section_header.dart';
 import 'format.dart';
 
@@ -30,6 +32,7 @@ class VaultSettingsSheet extends ConsumerWidget {
     final info = ref.watch(vaultInfoProvider);
     final actions = ref.watch(vaultActionsProvider);
     final notifier = ref.read(vaultActionsProvider.notifier);
+    final origin = ref.watch(vaultSessionProvider)?.cloud;
 
     // Surface transient results/failures from maintenance ops as snackbars.
     ref.listen<String?>(vaultActionsProvider.select((s) => s.notice), (
@@ -55,6 +58,13 @@ class VaultSettingsSheet extends ConsumerWidget {
               child: Divider(),
             ),
             if (actions.busy) const LinearProgressIndicator(minHeight: 2),
+            if (origin != null) ...[
+              _cachePinTile(context, ref, origin),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 6),
+                child: Divider(),
+              ),
+            ],
             ...info.when(
               loading: () => const [
                 Padding(
@@ -118,6 +128,32 @@ class VaultSettingsSheet extends ConsumerWidget {
     if (changed == true) {
       ref.invalidate(vaultInfoProvider);
     }
+  }
+
+  /// Dropbox-style cache pin for cloud vaults: keep the copy on this device
+  /// (open without the network) or go online-only (no disk footprint —
+  /// download on open, purge on lock).
+  Widget _cachePinTile(BuildContext context, WidgetRef ref, CloudOrigin origin) {
+    final pins = ref.watch(cloudPinProvider).value ?? const {};
+    final offline = pins[origin.remotePath]?.mode == CloudPinMode.offline;
+    return SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      secondary: Icon(
+        offline ? Icons.offline_pin : Icons.cloud_outlined,
+      ),
+      title: const Text('Available offline'),
+      subtitle: Text(
+        offline
+            ? 'A copy stays on this device — open it without the internet; '
+                'edits sync when you\'re back online.'
+            : 'No copy is kept on this device — opening needs the internet '
+                '(uses no disk space).',
+      ),
+      value: offline,
+      onChanged: (v) => ref
+          .read(cloudPinProvider.notifier)
+          .setMode(origin.remotePath, v ? CloudPinMode.offline : CloudPinMode.onlineOnly),
+    );
   }
 
   Widget _infoPanel(BuildContext context, VaultInfoModel info) {

@@ -18,7 +18,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../provider/browser_provider.dart';
+import '../provider/cloud_pin_provider.dart';
 import '../provider/cloud_sync_provider.dart';
+import '../provider/file_provider.dart';
 import '../provider/session_provider.dart';
 import 'cloud_sync_banner.dart';
 import 'common/action_sheet.dart';
@@ -147,7 +149,7 @@ class VaultBrowserScreen extends ConsumerWidget {
     final sync = ref.read(cloudSyncProvider);
     final needsSyncPrompt = sync.dirty || sync.busy || sync.conflict;
     if (!needsSyncPrompt) {
-      await ref.read(vaultSessionProvider.notifier).close();
+      await _closeAndRelease(context, ref, origin);
       return;
     }
     final choice = await showDialog<_LockDecision>(
@@ -190,7 +192,42 @@ class VaultBrowserScreen extends ConsumerWidget {
         return;
       }
     }
+    if (!context.mounted) {
+      // Widget gone mid-flow — release the session without UI feedback.
+      await ref.read(vaultSessionProvider.notifier).close();
+      return;
+    }
+    await _closeAndRelease(context, ref, origin);
+  }
+
+  /// Close the session, then apply the vault's cache pin:
+  ///   - online-only + nothing pending → purge the cache copy (no disk use);
+  ///   - online-only + pending edits → keep it and say so (never delete the
+  ///     only copy of unsynced changes);
+  ///   - available offline → keep it.
+  Future<void> _closeAndRelease(
+    BuildContext context,
+    WidgetRef ref,
+    CloudOrigin origin,
+  ) async {
+    final pin = await ref.read(cloudPinProvider.notifier).pinFor(
+      origin.remotePath,
+    );
+    final pending =
+        ref.read(cloudSyncProvider).dirty ||
+        ref.read(cloudSyncProvider).conflict;
+    final isOnlineOnly = pin.mode == CloudPinMode.onlineOnly;
+    if (isOnlineOnly && pending && context.mounted) {
+      showSnack(
+        context,
+        'Changes were not uploaded — the cached copy stays on disk '
+        '(nothing is lost).',
+      );
+    }
     await ref.read(vaultSessionProvider.notifier).close();
+    if (isOnlineOnly && !pending) {
+      await ref.read(fileServiceProvider).deleteVaultCache(origin.cachePath);
+    }
   }
 
   void _enterFolder(WidgetRef ref, String path) {

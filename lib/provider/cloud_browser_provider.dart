@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'file_provider.dart';
+import 'cloud_pin_provider.dart';
 import 'rclone_provider.dart';
 import 'session_provider.dart';
 
@@ -214,6 +215,11 @@ class CloudBrowserNotifier extends Notifier<CloudBrowserState> {
         }
         await service.upload(cachePath, remotePath);
         final after = await service.findRemoteEntry(remotePath);
+        if (after != null) {
+          await ref
+              .read(cloudPinProvider.notifier)
+              .recordSync(remotePath, after.size, after.modTime);
+        }
         ref
             .read(vaultSessionProvider.notifier)
             .adopt(

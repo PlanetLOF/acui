@@ -2,11 +2,18 @@
 // folders, and open / save / create `.ac` vaults there. Remote configuration
 // happens through rclone's own wizard (launched via NEW REMOTE…), then this
 // screen lists whatever remotes exist in `rclone.conf`.
+//
+// Vaults carry a cache pin (see `cloud_pin_provider.dart`): "online only"
+// (default — download on open, purge on lock) or "available offline" (the
+// cached copy is reused and can be opened without the network).
+
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../provider/cloud_browser_provider.dart';
+import '../../provider/cloud_pin_provider.dart';
 import '../../provider/cloud_sync_provider.dart';
 import '../../provider/rclone_provider.dart';
 import '../../provider/session_provider.dart';
@@ -122,19 +129,46 @@ class CloudScreen extends ConsumerWidget {
     final location = notifier.currentRemotePath;
     if (location == null) return;
     final (remote, dir) = splitRemotePath(location);
-    final String cachePath;
-    try {
-      cachePath = await notifier.downloadToCache(entry);
-    } on RcloneException catch (e) {
-      if (context.mounted) showSnack(context, 'Download failed: ${e.message}');
-      return;
-    } catch (e) {
-      if (context.mounted) showSnack(context, 'Download failed: $e');
-      return;
+    final remotePath = remotePathOf(remote, [dir, entry.name]);
+    final cachePath = await notifier.cachePathFor(entry);
+    final pin = await ref.read(cloudPinProvider.notifier).pinFor(remotePath);
+
+    // "Available offline" + an existing cache copy = open straight from disk
+    // (works without the network). Everything else downloads first.
+    final fromCache = pin.mode == CloudPinMode.offline &&
+        File(cachePath).existsSync();
+    final String usedCachePath;
+    if (fromCache) {
+      usedCachePath = cachePath;
+    } else {
+      try {
+        usedCachePath = await notifier.downloadToCache(entry);
+      } on RcloneException catch (e) {
+        if (context.mounted) {
+          showSnack(context, 'Download failed: ${e.message}');
+        }
+        return;
+      } catch (e) {
+        if (context.mounted) showSnack(context, 'Download failed: $e');
+        return;
+      }
+      // The download is the remote content — record its fingerprint so a
+      // later from-cache open has a correct conflict baseline.
+      await ref
+          .read(cloudPinProvider.notifier)
+          .recordSync(remotePath, entry.size, entry.modTime);
     }
     if (!context.mounted) return;
 
-    final remotePath = remotePathOf(remote, [dir, entry.name]);
+    // Baseline for the conflict guard: for a cache open use the stored
+    // fingerprint (the remote state at last sync), falling back to the
+    // listing; for a download use the fresh listing.
+    final stateAtOpen = fromCache
+        ? RemoteState(
+            pin.lastSize ?? entry.size,
+            pin.lastModTime ?? entry.modTime,
+          )
+        : RemoteState(entry.size, entry.modTime);
     await showDialog<bool>(
       context: context,
       builder: (_) => CloudOpenVaultDialog(
@@ -143,12 +177,12 @@ class CloudScreen extends ConsumerWidget {
           await ref
               .read(vaultSessionProvider.notifier)
               .open(
-                cachePath,
+                usedCachePath,
                 password,
                 cloud: CloudOrigin(
                   remotePath: remotePath,
-                  cachePath: cachePath,
-                  stateAtOpen: RemoteState(entry.size, entry.modTime),
+                  cachePath: usedCachePath,
+                  stateAtOpen: stateAtOpen,
                 ),
               );
           ref
@@ -156,10 +190,15 @@ class CloudScreen extends ConsumerWidget {
               .reset(
                 CloudOrigin(
                   remotePath: remotePath,
-                  cachePath: cachePath,
-                  stateAtOpen: RemoteState(entry.size, entry.modTime),
+                  cachePath: usedCachePath,
+                  stateAtOpen: stateAtOpen,
                 ),
               );
+          if (fromCache) {
+            // Push offline edits (or pick up remote changes) through the
+            // normal conflict guard; rclone skips when the bytes match.
+            ref.read(cloudSyncProvider.notifier).syncNow();
+          }
         },
       ),
     );
@@ -433,7 +472,7 @@ class _FolderTile extends StatelessWidget {
   }
 }
 
-class _VaultTile extends StatelessWidget {
+class _VaultTile extends ConsumerWidget {
   const _VaultTile({
     required this.entry,
     required this.busy,
@@ -448,13 +487,32 @@ class _VaultTile extends StatelessWidget {
   final ValueChanged<RcloneEntry> onSaveAs;
   final ValueChanged<RcloneEntry> onDelete;
 
+  /// The `remote:folder/name` of this vault row.
+  String _remotePath(WidgetRef ref) {
+    final location = ref.read(cloudBrowserProvider.notifier).currentRemotePath;
+    if (location == null) return entry.name;
+    final (remote, dir) = splitRemotePath(location);
+    return remotePathOf(remote, [dir, entry.name]);
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final remotePath = _remotePath(ref);
+    final pins = ref.watch(cloudPinProvider).value ?? const {};
+    final offline =
+        pins[remotePath]?.mode == CloudPinMode.offline;
+
     return ListTile(
       dense: true,
-      leading: const Icon(Icons.lock_outline),
+      leading: Icon(
+        offline ? Icons.offline_pin : Icons.cloud_outlined,
+        color: offline ? Colors.green.shade700 : null,
+      ),
       title: Text(entry.name),
-      subtitle: Text(formatBytes(entry.size)),
+      subtitle: Text(
+        '${formatBytes(entry.size)} · '
+        '${offline ? 'available offline' : 'online only'}',
+      ),
       trailing: IconButton(
         tooltip: 'Actions',
         onPressed: busy
@@ -471,6 +529,40 @@ class _VaultTile extends StatelessWidget {
                       onTap: () {
                         Navigator.of(sheetContext).pop();
                         onOpen(entry);
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.cloud_outlined),
+                      title: const Text('Online only'),
+                      subtitle: const Text(
+                        'Uses no device storage; needs internet to open '
+                        '(cache purged when locked)',
+                      ),
+                      trailing: offline ? const Icon(Icons.check) : null,
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        if (offline) {
+                          ref
+                              .read(cloudPinProvider.notifier)
+                              .setMode(remotePath, CloudPinMode.onlineOnly);
+                        }
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.offline_pin),
+                      title: const Text('Available offline'),
+                      subtitle: const Text(
+                        'Keeps a copy on this device — open it without the '
+                        'network; edits sync when back online',
+                      ),
+                      trailing: offline ? null : const Icon(Icons.check),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        if (!offline) {
+                          ref
+                              .read(cloudPinProvider.notifier)
+                              .setMode(remotePath, CloudPinMode.offline);
+                        }
                       },
                     ),
                     ListTile(
