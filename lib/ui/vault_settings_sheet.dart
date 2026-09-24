@@ -88,7 +88,13 @@ class VaultSettingsSheet extends ConsumerWidget {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: actions.busy ? null : notifier.compact,
+                    onPressed: actions.busy
+                        ? null
+                        : () async {
+                            if (await notifier.compact() && context.mounted) {
+                              Navigator.of(context).pop();
+                            }
+                          },
                     icon: const Icon(Icons.cleaning_services_outlined),
                     label: const Text('Compact'),
                   ),
@@ -96,7 +102,13 @@ class VaultSettingsSheet extends ConsumerWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: actions.busy ? null : notifier.remirror,
+                    onPressed: actions.busy
+                        ? null
+                        : () async {
+                            if (await notifier.remirror() && context.mounted) {
+                              Navigator.of(context).pop();
+                            }
+                          },
                     icon: const Icon(Icons.copy_all_outlined),
                     label: const Text('Remirror'),
                   ),
@@ -117,6 +129,9 @@ class VaultSettingsSheet extends ConsumerWidget {
     );
     if (changed == true) {
       ref.invalidate(vaultInfoProvider);
+      // The password change succeeded — dismiss the settings sheet along with
+      // the dialog so the user lands back on the browser.
+      if (context.mounted) Navigator.of(context).pop();
     }
   }
 

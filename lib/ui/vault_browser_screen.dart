@@ -8,11 +8,15 @@
 // worker isolate, so this widget is a pure consumer of Riverpod state — no
 // local mutable state beyond the transient file dialogs.
 //
-// File pickers come from `FileService` (file_selector).
+// File pickers come from `FileService` (file_selector); the whole browser
+// body is also a drop zone (`_ImportDropZone`) that imports dragged files and
+// folders through the same `importPaths` code path.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:autocipher_dart/autocipher_dart.dart';
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -118,7 +122,14 @@ class VaultBrowserScreen extends ConsumerWidget {
       body: Column(
         children: [
           if (actions.busy) const LinearProgressIndicator(minHeight: 2),
-          Expanded(child: _buildBody(context, ref, files, dir, view)),
+          Expanded(
+            child: _ImportDropZone(
+              folderLabel: inFolder ? dir : 'vault root',
+              onDrop: (paths) =>
+                  ref.read(vaultActionsProvider.notifier).importPaths(paths),
+              child: _buildBody(context, ref, files, dir, view),
+            ),
+          ),
         ],
       ),
     );
@@ -172,13 +183,19 @@ class VaultBrowserScreen extends ConsumerWidget {
       ),
       data: (list) {
         if (list.isEmpty) {
-          return const Center(
-            child: Text('Empty vault — use Import to add files.'),
+          return const _EmptyDropHint(
+            icon: Icons.move_to_inbox_outlined,
+            title: 'Drag & drop files to import',
+            subtitle: '…or tap IMPORT to pick files or a folder.',
           );
         }
         final entries = buildBrowserEntries(list, dir);
         if (entries.isEmpty) {
-          return const Center(child: Text('Empty folder.'));
+          return const _EmptyDropHint(
+            icon: Icons.folder_open,
+            title: 'This folder is empty',
+            subtitle: 'Drop files here to add them, or use IMPORT.',
+          );
         }
         return RefreshIndicator(
           onRefresh: () => _pullToRefresh(ref),
@@ -923,4 +940,204 @@ class _HexView extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Turns the whole browser body into a drop zone: while an OS drag hovers over
+/// the file area an overlay explains that the drop imports into the current
+/// vault folder, and on drop the dropped filesystem paths are handed to
+/// [VaultActionsNotifier.importPaths] — files land in the current folder,
+/// directories import their whole tree (same semantics as the Import dialogs).
+class _ImportDropZone extends StatefulWidget {
+  const _ImportDropZone({
+    required this.child,
+    required this.onDrop,
+    required this.folderLabel,
+  });
+
+  final Widget child;
+
+  /// Receives the dropped filesystem paths (filtered to non-empty).
+  final void Function(List<String> paths) onDrop;
+
+  /// The folder the browser is showing (`''` root label is "vault root"),
+  /// used by the drop overlay copy.
+  final String folderLabel;
+
+  @override
+  State<_ImportDropZone> createState() => _ImportDropZoneState();
+}
+
+class _ImportDropZoneState extends State<_ImportDropZone> {
+  bool _dragging = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragging = true),
+      onDragExited: (_) => setState(() => _dragging = false),
+      onDragDone: (detail) {
+        setState(() => _dragging = false);
+        widget.onDrop([
+          for (final f in detail.files)
+            if (f.path.trim().isNotEmpty) f.path,
+        ]);
+      },
+      child: Stack(
+        children: [
+          widget.child,
+          if (_dragging)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ColoredBox(
+                  color: scheme.primary.withValues(alpha: 0.08),
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 28,
+                        vertical: 18,
+                      ),
+                      decoration: BoxDecoration(
+                        color: scheme.surface,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: scheme.primary, width: 2),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black26,
+                            blurRadius: 16,
+                            offset: Offset(0, 6),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.move_to_inbox_outlined,
+                            size: 44,
+                            color: scheme.primary,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Drop to import into ${widget.folderLabel}',
+                            style: theme.textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Files and folders are added to the '
+                            'current vault folder.',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The resting placeholder for an empty vault or empty folder: a centered
+/// dashed-border card that advertises the browser's drag-and-drop import,
+/// so users know they can drop files here even before they hover.
+class _EmptyDropHint extends StatelessWidget {
+  const _EmptyDropHint({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: CustomPaint(
+            painter: _DashedBorderPainter(
+              color: scheme.outlineVariant,
+              radius: 14,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(32, 28, 32, 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 44, color: scheme.primary),
+                  const SizedBox(height: 14),
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    subtitle,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Paints a dashed rounded-rectangle outline — the "drop here" affordance of
+/// the empty vault/folder placeholders. Self-contained so the app doesn't
+/// need a dashed-border package for one decorative touch.
+class _DashedBorderPainter extends CustomPainter {
+  const _DashedBorderPainter({required this.color, required this.radius});
+
+  final Color color;
+  final double radius;
+
+  static const double _dash = 6.0;
+  static const double _gap = 5.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6;
+    final path = Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(
+          Offset.zero & size,
+          Radius.circular(radius),
+        ),
+      );
+    // Stroke the perimeter in a dash/gap rhythm (RRect metrics yield a
+    // single contour).
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final end = math.min(distance + _dash, metric.length);
+        canvas.drawPath(metric.extractPath(distance, end), paint);
+        distance += _dash + _gap;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedBorderPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.radius != radius;
 }

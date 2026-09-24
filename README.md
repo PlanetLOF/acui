@@ -16,7 +16,9 @@ flutter_rust_bridge, no cargokit, no gRPC, no sidecar process.
   connection-tab selection, file dialogs, random-password generation.
 - `lib/ui/` — provider-tab entry (FTP/FTPS, SFTP/SSH, local create/open), the
   vault browser (import/extract/preview/rename/delete), and settings (change
-  password, compact, remirror, container info).
+  password, compact, remirror, container info). Import accepts files and
+  folders both from the native dialogs and by dragging them onto the browser
+  (drop lands in the folder you're currently viewing).
 - `lib/ui/preview.dart` — pure-Dart preview-kind detection (image / SVG /
   video / text / binary), plus the image/video-name helpers that drive the
   grid & list thumbnails. Raster files show real thumbnails; video files show

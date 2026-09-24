@@ -214,21 +214,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     if (state.busy) return;
     final picked = await ref.read(fileServiceProvider).pickImportFiles();
     if (picked.isEmpty) return;
-    final session = _session;
-    if (session == null) return;
-    _setBusy(true);
-    try {
-      final items = [
-        for (final p in picked) (src: p, storedName: _childName(basenameOf(p))),
-      ];
-      final count = await session.addPaths(items);
-      await _reload();
-      _notice('Imported ${_plural(count, 'file')}.');
-    } on AutocipherException catch (e) {
-      _notice(exceptionText(e));
-    } finally {
-      _setBusy(false);
-    }
+    await importPaths(picked);
   }
 
   /// Import every file of the picked folder plus the folder itself: stored
@@ -238,31 +224,58 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     if (state.busy) return;
     final dir = await ref.read(fileServiceProvider).pickDirectory();
     if (dir == null) return;
+    await importPaths([dir]);
+  }
+
+  /// Import the given host paths into the current vault folder in one busy
+  /// window — the shared path behind the Import files… / Import folder…
+  /// dialogs and the drag-and-drop zone, so the gestures can never drift.
+  ///
+  /// Files are stored under their own basename in the current folder.
+  /// Directories are walked recursively: stored names get the folder's own
+  /// name as prefix (e.g. a dropped `Photos` lands as `Photos/2024/1.jpg`)
+  /// and empty subfolders are preserved as `.ackeep` markers.
+  Future<void> importPaths(List<String> paths) async {
+    if (state.busy) return;
+    final cleaned = [
+      for (final p in paths)
+        if (p.trim().isNotEmpty) p.trim(),
+    ];
+    if (cleaned.isEmpty) return;
     final session = _session;
     if (session == null) return;
     _setBusy(true);
     try {
-      final root = Directory(dir.replaceAll(RegExp(r'[/\\]+$'), ''));
-      final rootName = basenameOf(root.path);
       final items = <({String src, String storedName})>[];
       final markers = <String>[];
 
-      void visit(Directory d, String rel) {
-        // `rel` is the stored path of this directory including the root name.
-        markers.add(_childName('$rel/$folderMarker'));
-        for (final entity in d.listSync(followLinks: false)) {
-          if (entity is Directory) {
-            visit(entity, '$rel/${basenameOf(entity.path)}');
-          } else if (entity is File) {
-            items.add((
-              src: entity.path,
-              storedName: _childName('$rel/${basenameOf(entity.path)}'),
-            ));
+      for (final p in cleaned) {
+        final type = FileSystemEntity.typeSync(p, followLinks: false);
+        if (type == FileSystemEntityType.directory) {
+          final root = Directory(p.replaceAll(RegExp(r'[/\\]+$'), ''));
+          final rootName = basenameOf(root.path);
+
+          void visit(Directory d, String rel) {
+            // `rel` is the stored path of this directory including the root
+            // name; `_childName` joins it under the current vault folder.
+            markers.add(_childName('$rel/$folderMarker'));
+            for (final entity in d.listSync(followLinks: false)) {
+              if (entity is Directory) {
+                visit(entity, '$rel/${basenameOf(entity.path)}');
+              } else if (entity is File) {
+                items.add((
+                  src: entity.path,
+                  storedName: _childName('$rel/${basenameOf(entity.path)}'),
+                ));
+              }
+            }
           }
+
+          visit(root, rootName);
+        } else if (type == FileSystemEntityType.file) {
+          items.add((src: p, storedName: _childName(basenameOf(p))));
         }
       }
-
-      visit(root, rootName);
 
       var count = 0;
       if (items.isNotEmpty) {
@@ -274,11 +287,13 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
         await session.put(m, Uint8List(0));
       }
       await _reload();
-      _notice(
-        items.isEmpty
-            ? 'Imported empty folder "$rootName".'
-            : 'Imported ${_plural(count, 'file')} in "$rootName".',
-      );
+      if (items.isEmpty && markers.isEmpty) {
+        _notice('No files or folders to import in the selection.');
+      } else if (items.isEmpty) {
+        _notice('Imported an empty folder.');
+      } else {
+        _notice('Imported ${_plural(count, 'file')}.');
+      }
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
     } finally {
@@ -462,10 +477,11 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     if (loc != null) _notice('Saved to $loc');
   }
 
-  Future<void> compact() async {
-    if (state.busy) return;
+  /// Compact the vault container; returns whether the operation succeeded.
+  Future<bool> compact() async {
+    if (state.busy) return false;
     final session = _session;
-    if (session == null) return;
+    if (session == null) return false;
     _setBusy(true);
     try {
       final before = (await ref.read(vaultInfoProvider.future)).garbageBytes;
@@ -478,24 +494,30 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
             ? 'Compacted — reclaimed ${formatBytes(reclaimed)}.'
             : 'Vault is already compact.',
       );
+      return true;
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
+      return false;
     } finally {
       _setBusy(false);
     }
   }
 
-  Future<void> remirror() async {
-    if (state.busy) return;
+  /// Regenerate both container mirrors; returns whether the operation
+  /// succeeded.
+  Future<bool> remirror() async {
+    if (state.busy) return false;
     final session = _session;
-    if (session == null) return;
+    if (session == null) return false;
     _setBusy(true);
     try {
       await session.remirror();
       await _reload();
       _notice('Mirrors regenerated.');
+      return true;
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
+      return false;
     } finally {
       _setBusy(false);
     }
