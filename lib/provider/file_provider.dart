@@ -22,6 +22,26 @@ class FileService {
     return file?.path;
   }
 
+  /// "Save as…" dialog for a vault file (name + optional `.ac` extension),
+  /// returning only the location — nothing is written to disk.
+  Future<String?> saveVaultAs(String suggestedName) async {
+    const typeGroup = XTypeGroup(label: 'vault', extensions: _vaultExt);
+    final loc = await getSaveLocation(
+      suggestedName: suggestedName,
+      acceptedTypeGroups: const [typeGroup],
+    );
+    if (loc == null) return null;
+    var path = loc.path;
+    if (!path.toLowerCase().endsWith('.ac')) path += '.ac';
+    return path;
+  }
+
+  /// Any-file open dialog (rclone binary path etc.).
+  Future<String?> pickExecutable() async {
+    final file = await openFile();
+    return file?.path;
+  }
+
   /// Native "Save as…" dialog for a new vault, pre-filled with `vault.ac`.
   ///
   /// Picks the exact file path (name included); nothing is written to the

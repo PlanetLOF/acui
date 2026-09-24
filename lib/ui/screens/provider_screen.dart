@@ -6,6 +6,7 @@ import '../../provider/provider_tab_provider.dart';
 import '../../provider/session_provider.dart';
 import '../common/section_header.dart';
 import '../vault_browser_screen.dart';
+import 'cloud_screen.dart';
 import 'ftp_screen.dart';
 import 'local_create_screen.dart';
 import 'local_open_screen.dart';
@@ -65,6 +66,7 @@ class _ProviderShell extends ConsumerWidget {
                         child: switch (tab) {
                           ProviderTab.ftp => const FtpScreen(),
                           ProviderTab.ssh => const SshScreen(),
+                          ProviderTab.cloud => const CloudScreen(),
                           ProviderTab.create => const LocalCreateScreen(),
                           ProviderTab.open => const LocalOpenScreen(),
                         },

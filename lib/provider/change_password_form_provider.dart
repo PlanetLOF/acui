@@ -6,6 +6,7 @@ import 'package:autocipher_dart/autocipher_dart.dart';
 import 'package:flutter/material.dart' show TextEditingController;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'cloud_sync_provider.dart';
 import 'session_provider.dart';
 
 class ChangePasswordFormState {
@@ -81,13 +82,17 @@ class ChangePasswordFormNotifier extends Notifier<ChangePasswordFormState> {
       return;
     }
     state = state.copyWith(busy: true, notice: null);
-    final session = ref.read(vaultSessionProvider);
+    final session = ref.read(vaultSessionProvider)?.vault;
     if (session == null) {
       state = state.copyWith(busy: false, notice: 'No open vault.');
       return;
     }
     try {
       await session.changePassword(password.text, preset);
+      final openSession = ref.read(vaultSessionProvider);
+      if (openSession != null && openSession.isCloud) {
+        ref.read(cloudSyncProvider.notifier).schedule();
+      }
       state = state.copyWith(busy: false, done: true);
     } on AutocipherException catch (e) {
       state = state.copyWith(busy: false, notice: e.message);

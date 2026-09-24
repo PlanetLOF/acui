@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 enum ProviderTab {
   ftp('FTP/FTPS'),
   ssh('SFTP/SSH'),
+  cloud('CLOUD'),
   create('CREATE'),
   open('OPEN');
 

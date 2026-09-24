@@ -39,5 +39,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('OPEN LOCAL VAULT (.AC)'), findsOneWidget);
     expect(find.text('OPEN VAULT'), findsOneWidget);
+
+    // Switch to CLOUD. Note: no pumpAndSettle here — the tab mounts the
+    // remotes FutureProvider, whose spinner animates indefinitely until
+    // rclone answers (or errors); pump fixed durations instead and assert
+    // on the static chrome.
+    await tester.tap(find.text('CLOUD'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('CLOUD STORAGE (RCLONE)'), findsOneWidget);
+    expect(find.text('NEW REMOTE…'), findsOneWidget);
+    expect(find.text('CREATE VAULT HERE'), findsOneWidget);
   });
 }

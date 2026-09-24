@@ -18,7 +18,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../provider/browser_provider.dart';
+import '../provider/cloud_sync_provider.dart';
 import '../provider/session_provider.dart';
+import 'cloud_sync_banner.dart';
 import 'common/action_sheet.dart';
 import 'format.dart';
 import 'preview.dart';
@@ -36,6 +38,7 @@ class VaultBrowserScreen extends ConsumerWidget {
     final actions = ref.watch(vaultActionsProvider);
     final dir = ref.watch(currentVaultFolderProvider);
     final view = ref.watch(browserViewProvider).value ?? BrowserView.list;
+    final session = ref.watch(vaultSessionProvider);
     final inFolder = dir.isNotEmpty;
 
     // Surface transient results/failures from vault mutations as snackbars.
@@ -65,7 +68,7 @@ class VaultBrowserScreen extends ConsumerWidget {
                   if (inFolder) {
                     _goUp(ref, dir);
                   } else {
-                    ref.read(vaultSessionProvider.notifier).close();
+                    _lockVault(context, ref);
                   }
                 },
           icon: Icon(inFolder ? Icons.arrow_back : Icons.lock_outline),
@@ -118,6 +121,7 @@ class VaultBrowserScreen extends ConsumerWidget {
       body: Column(
         children: [
           if (actions.busy) const LinearProgressIndicator(minHeight: 2),
+          if (session != null && session.isCloud) const CloudSyncBanner(),
           Expanded(child: _buildBody(context, ref, files, dir, view)),
         ],
       ),
@@ -126,6 +130,67 @@ class VaultBrowserScreen extends ConsumerWidget {
 
   void _goUp(WidgetRef ref, String dir) {
     ref.read(currentVaultFolderProvider.notifier).go(parentOfPath(dir));
+  }
+
+  /// Lock the vault. Local sessions lock immediately. Cloud sessions lock
+  /// immediately too when auto-sync has already pushed everything (clean
+  /// state); only when edits are pending, a sync failed, or a conflict is
+  /// active do we offer to upload first, so changes are never silently left
+  /// behind (an upload failure keeps the vault open).
+  Future<void> _lockVault(BuildContext context, WidgetRef ref) async {
+    final session = ref.read(vaultSessionProvider);
+    if (session == null || !session.isCloud) {
+      await ref.read(vaultSessionProvider.notifier).close();
+      return;
+    }
+    final origin = session.cloud!;
+    final sync = ref.read(cloudSyncProvider);
+    final needsSyncPrompt = sync.dirty || sync.busy || sync.conflict;
+    if (!needsSyncPrompt) {
+      await ref.read(vaultSessionProvider.notifier).close();
+      return;
+    }
+    final choice = await showDialog<_LockDecision>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sync before locking?'),
+        content: Text(
+          'Upload the current vault to ${origin.remotePath} before locking?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(_LockDecision.lockOnly),
+            child: const Text('Lock without uploading'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(null),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(_LockDecision.uploadAndLock),
+            child: const Text('Upload & lock'),
+          ),
+        ],
+      ),
+    );
+    if (choice == null || choice == _LockDecision.cancel) return;
+
+    if (choice == _LockDecision.uploadAndLock) {
+      // Wait for an in-flight auto-sync to settle, then upload; surface the
+      // real reason (conflict / rclone error / busy) instead of a canned one.
+      final reason = await ref
+          .read(cloudSyncProvider.notifier)
+          .syncWhenIdle();
+      if (reason != null) {
+        if (context.mounted) {
+          showSnack(context, 'Upload failed — $reason The vault stays open.');
+        }
+        return;
+      }
+    }
+    await ref.read(vaultSessionProvider.notifier).close();
   }
 
   void _enterFolder(WidgetRef ref, String path) {
@@ -912,3 +977,6 @@ class _HexView extends StatelessWidget {
     );
   }
 }
+
+/// What the cloud lock prompt decided.
+enum _LockDecision { uploadAndLock, lockOnly, cancel }

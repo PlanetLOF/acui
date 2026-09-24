@@ -18,6 +18,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ui/format.dart';
 import '../ui/vault_model.dart';
+import 'cloud_sync_provider.dart';
 import 'file_provider.dart';
 import 'session_provider.dart';
 
@@ -40,7 +41,7 @@ Vault _watchSession(Ref ref) {
   if (session == null) {
     throw StateError('no open vault session');
   }
-  return session;
+  return session.vault;
 }
 
 /// The folder shown by the browser; `''` = vault root. Scoped to the open
@@ -194,10 +195,18 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
   @override
   VaultActionsState build() => const VaultActionsState();
 
-  Vault? get _session => ref.read(vaultSessionProvider);
+  Vault? get _session => ref.read(vaultSessionProvider)?.vault;
 
   void _setBusy(bool value) => state = state.copyWith(busy: value);
   void _notice(String message) => state = state.copyWith(notice: message);
+
+  /// After a mutation that rewrote the vault container, kick the cloud
+  /// auto-sync (a no-op for local sessions).
+  void _scheduleCloudSync() {
+    final session = ref.read(vaultSessionProvider);
+    if (session == null || !session.isCloud) return;
+    ref.read(cloudSyncProvider.notifier).schedule();
+  }
 
   Future<void> _reload() async {
     ref.invalidate(vaultFilesProvider);
@@ -223,6 +232,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
       ];
       final count = await session.addPaths(items);
       await _reload();
+      _scheduleCloudSync();
       _notice('Imported ${_plural(count, 'file')}.');
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
@@ -274,6 +284,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
         await session.put(m, Uint8List(0));
       }
       await _reload();
+      _scheduleCloudSync();
       _notice(
         items.isEmpty
             ? 'Imported empty folder "$rootName".'
@@ -295,6 +306,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     try {
       await session.put(_childName('$name/$folderMarker'), Uint8List(0));
       await _reload();
+      _scheduleCloudSync();
       _notice('Created folder "$name".');
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
@@ -326,6 +338,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
         );
       }
       await _reload();
+      _scheduleCloudSync();
       _notice('Renamed folder to "$newName".');
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
@@ -350,6 +363,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
         await session.delete(name);
       }
       await _reload();
+      _scheduleCloudSync();
       _notice(
         'Deleted folder "${basenameOf(path)}" '
         '(${_plural(affected.length, 'item')}).',
@@ -431,6 +445,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     try {
       await session.rename(oldName, newName);
       await _reload();
+      _scheduleCloudSync();
       _notice('Renamed to $newName.');
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
@@ -447,6 +462,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     try {
       await session.delete(name);
       await _reload();
+      _scheduleCloudSync();
       _notice('Deleted ${basenameOf(name)}.');
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
@@ -473,6 +489,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
       final _ = await ref.refresh(vaultInfoProvider.future);
       final after = ref.read(vaultInfoProvider).value?.garbageBytes ?? 0;
       final reclaimed = before - after;
+      _scheduleCloudSync();
       _notice(
         reclaimed > 0
             ? 'Compacted — reclaimed ${formatBytes(reclaimed)}.'
@@ -493,6 +510,7 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     try {
       await session.remirror();
       await _reload();
+      _scheduleCloudSync();
       _notice('Mirrors regenerated.');
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));

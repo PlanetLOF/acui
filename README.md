@@ -13,10 +13,13 @@ flutter_rust_bridge, no cargokit, no gRPC, no sidecar process.
   create/open/changePassword, folder imports, compact) run on worker isolates
   inside the wrapper, so they never block the UI.
 - `lib/provider/` — riverpod state: the open `Vault` (`vaultSessionProvider`),
-  connection-tab selection, file dialogs, random-password generation.
-- `lib/ui/` — provider-tab entry (FTP/FTPS, SFTP/SSH, local create/open), the
-  vault browser (import/extract/preview/rename/delete), and settings (change
-  password, compact, remirror, container info).
+  connection-tab selection, file dialogs, random-password generation. Cloud
+  support lives in `rclone_provider.dart` (rclone bridge), the cloud browser
+  and the cloud-sync notifier.
+- `lib/ui/` — provider-tab entry (FTP/FTPS, SFTP/SSH, cloud, local
+  create/open), the vault browser (import/extract/preview/rename/delete), the
+  cloud-sync banner, and settings (change password, compact, remirror,
+  container info, rclone).
 - `lib/ui/preview.dart` — pure-Dart preview-kind detection (image / SVG /
   video / text / binary), plus the image/video-name helpers that drive the
   grid & list thumbnails. Raster files show real thumbnails; video files show
@@ -77,6 +80,40 @@ path. The loader's runtime `AUTOCIPHER_FFI_LIB` env var also works for quick
 experiments (and is how the monorepo's engine tests find the library). If the
 file is missing a build proceeds with a warning and no engine bundled.
 
+## Cloud storage (rclone)
+
+The **CLOUD** tab stores vaults on any rclone-backed cloud service — Google
+Drive, OneDrive, Dropbox, Terabox, S3, WebDAV, … — as one encrypted `.ac`
+blob per vault. The app shells out to the `rclone` binary (no SDK per
+provider) and stays provider-agnostic: every operation talks to whatever
+remotes exist in the user's `rclone.conf`.
+
+- **Setup** — `rclone` must be installed and on `PATH` (or set explicitly in
+  the rclone settings sheet). In the CLOUD tab, **NEW REMOTE…** opens
+  rclone's own interactive `config` wizard in a terminal window; close it and
+  tap **REFRESH** to pick the new remote.
+- **Browse** — pick a remote, drill into folders, open or save-as any `.ac`
+  vault, or **CREATE VAULT HERE** to make a new one directly in the current
+  remote folder (name + password + KDF preset). Deleting a remote vault file
+  is a whole-file delete; vaults are never placeholder-synced like OneDrive
+  placeholders.
+- **Cloud sessions** — opening a remote vault downloads it into a local cache
+  (`<home>/acui/<remote>\<path>` by default: `C:\Users\<name>\acui\…` on
+  Windows, `/Users/<name>/acui/…` on macOS, `/home/<name>/acui/…` on Linux;
+  the destination
+  folder is configurable from the rclone settings sheet, **CLOUD CACHE
+  FOLDER**) and unlocks that copy; the engine works on the same single-file
+  model as local vaults. The vault browser shows a sync banner with
+  **SYNC NOW** and **Make a local copy…**.
+- **Auto-sync** — after every mutation (import / extract / rename / delete /
+  compact / change password / remirror) a debounced (2 s) upload pushes the
+  updated `.ac` blob back to the cloud; the lock flow also offers
+  **Upload & lock**.
+- **Conflict guard** — before any upload the app stats the remote and, if it
+  changed since it was opened (size or modtime), refuses to silently
+  overwrite: you choose **Overwrite cloud** / **Reload from cloud** / make a
+  local copy first. A conflict can never be clobbered by an auto-sync.
+
 ## Run
 
 ```bash
@@ -92,7 +129,7 @@ flutter test
 ```
 
 - `test/widget_test.dart` — provider-tab shell smoke test (renders and
-  switches between the FTP/FTPS, SFTP/SSH, create, and open forms).
+  switches between the FTP/FTPS, SFTP/SSH, cloud, create, and open tabs).
 - Engine coverage lives in the monorepo's `dart/test/` (wire-format parity +
   a live lifecycle through the real ABI).
 
