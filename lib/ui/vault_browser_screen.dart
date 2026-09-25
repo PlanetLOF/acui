@@ -48,6 +48,8 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
   /// app-bar button turns it on; X or an empty selection turns it off).
   bool _selectionMode = false;
 
+  bool _locking = false;
+
   static const String _fileKeyPrefix = 'file:';
   static const String _folderKeyPrefix = 'folder:';
 
@@ -77,6 +79,33 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
     });
   }
 
+  /// Cover the current scene, close the native vault immediately, then let
+  /// the overlay finish over the provider shell. The overlay lives in the
+  /// root [Overlay] so it survives the browser being removed from the tree.
+  Future<void> _lockVault(WidgetRef ref) async {
+    if (_locking) return;
+    setState(() => _locking = true);
+
+    final overlay = Overlay.of(context, rootOverlay: true);
+    final entry = OverlayEntry(builder: (_) => const _VaultLockTransition());
+    final animationElapsed = Future<void>.delayed(_vaultLockAnimationDuration);
+    overlay.insert(entry);
+    try {
+      // Let the opaque transition cover the browser before the session-backed
+      // providers are invalidated by [VaultNotifier.close].
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      await ref.read(vaultSessionProvider.notifier).close();
+      await animationElapsed;
+    } catch (_) {
+      // VaultNotifier already treats a dead handle as a successful close. If
+      // the transition is interrupted, leave the browser usable.
+    } finally {
+      entry.remove();
+      if (mounted) setState(() => _locking = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final files = ref.watch(vaultFilesProvider);
@@ -84,6 +113,8 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
     final actions = ref.watch(vaultActionsProvider);
     final dir = ref.watch(currentVaultFolderProvider);
     final view = ref.watch(browserViewProvider).value ?? BrowserView.list;
+    final sort =
+        ref.watch(browserSortProvider).value ?? const VaultSortSettings();
     final inFolder = dir.isNotEmpty;
 
     // Surface transient results/failures from vault mutations as snackbars.
@@ -101,7 +132,7 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
 
     // The visible rows double as the select-all universe in selection mode.
     final entries = files.maybeWhen(
-      data: (list) => buildBrowserEntries(list, dir),
+      data: (list) => buildBrowserEntries(list, dir, sort: sort),
       orElse: () => const <VaultBrowserEntry>[],
     );
 
@@ -116,8 +147,10 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
         leading: IconButton(
           tooltip: _selectionMode
               ? 'Exit selection'
-              : (inFolder ? 'Up' : 'Lock vault'),
-          onPressed: actions.busy
+              : (inFolder
+                    ? 'Up'
+                    : (_locking ? 'Locking vault…' : 'Lock vault')),
+          onPressed: actions.busy || _locking
               ? null
               : () {
                   if (_selectionMode) {
@@ -125,7 +158,7 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
                   } else if (inFolder) {
                     _goUp(ref, dir);
                   } else {
-                    ref.read(vaultSessionProvider.notifier).close();
+                    _lockVault(ref);
                   }
                 },
           icon: Icon(
@@ -137,6 +170,13 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
         actions: _selectionMode
             ? _buildSelectionActions(context, ref, actions, entries)
             : [
+                IconButton(
+                  tooltip: 'Sort by',
+                  onPressed: actions.busy
+                      ? null
+                      : () => _showSortMenu(context, ref),
+                  icon: Icon(_sortIcon(sort.criterion)),
+                ),
                 IconButton(
                   tooltip: 'Select',
                   onPressed: actions.busy
@@ -380,10 +420,10 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
             title: Text(entry.displayName),
             subtitle: Text(
               entry.isFolder
-                  ? (entry.folder!.childCount == 0
+                  ? (entry.folder!.visibleChildCount == 0
                         ? 'Empty'
-                        : '${entry.folder!.childCount} '
-                              '${entry.folder!.childCount == 1 ? 'item' : 'items'}')
+                        : '${entry.folder!.visibleChildCount} '
+                              '${entry.folder!.visibleChildCount == 1 ? 'item' : 'items'}')
                   : formatBytes(entry.file!.size),
             ),
             selected: selected,
@@ -411,10 +451,10 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
             leading: const Icon(Icons.folder_outlined),
             title: Text(folder.name),
             subtitle: Text(
-              folder.childCount == 0
+              folder.visibleChildCount == 0
                   ? 'Empty'
-                  : '${folder.childCount} '
-                        '${folder.childCount == 1 ? 'item' : 'items'}',
+                  : '${folder.visibleChildCount} '
+                        '${folder.visibleChildCount == 1 ? 'item' : 'items'}',
             ),
             trailing: IconButton(
               tooltip: 'Actions',
@@ -481,10 +521,10 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
         final entry = entries[index];
         final selected = _selected.contains(entry.key);
         final String subtitle = entry.isFolder
-            ? (entry.folder!.childCount == 0
+            ? (entry.folder!.visibleChildCount == 0
                   ? 'Empty'
-                  : '${entry.folder!.childCount} '
-                        '${entry.folder!.childCount == 1 ? 'item' : 'items'}')
+                  : '${entry.folder!.visibleChildCount} '
+                        '${entry.folder!.visibleChildCount == 1 ? 'item' : 'items'}')
             : formatBytes(entry.file!.size);
         final card = Card(
           clipBehavior: Clip.antiAlias,
@@ -579,6 +619,7 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
     final notifier = ref.read(vaultActionsProvider.notifier);
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       builder: (sheetContext) => ActionSheet(
         title: 'IMPORT INTO VAULT',
         children: [
@@ -604,6 +645,59 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
       ),
     );
   }
+
+  void _showSortMenu(BuildContext context, WidgetRef ref) {
+    final notifier = ref.read(browserSortProvider.notifier);
+    final current =
+        ref.read(browserSortProvider).value ?? const VaultSortSettings();
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => ActionSheet(
+        title: 'SORT BY',
+        children: [
+          for (final criterion in VaultSort.values)
+            ListTile(
+              leading: Icon(_sortIcon(criterion)),
+              title: Text(_sortLabel(criterion)),
+              trailing: current.criterion == criterion
+                  ? const Icon(Icons.check)
+                  : null,
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                notifier.selectCriterion(criterion);
+              },
+            ),
+          const Divider(height: 1),
+          ListTile(
+            leading: Icon(
+              current.descending ? Icons.arrow_downward : Icons.arrow_upward,
+            ),
+            title: Text(current.descending ? 'Descending' : 'Ascending'),
+            subtitle: const Text('Reverse the current sort order'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              notifier.selectSettings(
+                current.withDescending(!current.descending),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _sortLabel(VaultSort criterion) => switch (criterion) {
+    VaultSort.name => 'Name',
+    VaultSort.modified => 'Date modified',
+    VaultSort.size => 'Size',
+  };
+
+  static IconData _sortIcon(VaultSort criterion) => switch (criterion) {
+    VaultSort.name => Icons.sort_by_alpha,
+    VaultSort.modified => Icons.update,
+    VaultSort.size => Icons.data_usage,
+  };
 
   /// App-bar toolbar replacing the normal actions while multi-select mode is
   /// active: select-all plus bulk Move / Extract / Delete.
@@ -710,8 +804,13 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
   ) {
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       builder: (sheetContext) => ActionSheet(
-        title: 'FOLDER ACTIONS',
+        title: folder.name,
+        subtitle: folder.visibleChildCount == 0
+            ? 'Empty folder · ${formatBytes(folder.size)}'
+            : '${folder.visibleChildCount} ${folder.visibleChildCount == 1 ? 'item' : 'items'} · ${formatBytes(folder.size)}',
+        titleIsLabel: false,
         children: [
           ListTile(
             leading: const Icon(Icons.folder_open),
@@ -719,6 +818,14 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
             onTap: () {
               Navigator.of(sheetContext).pop();
               _enterFolder(ref, folder.path);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('View information'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _showFolderInformation(context, folder);
             },
           ),
           ListTile(
@@ -772,9 +879,20 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
   ) {
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       builder: (sheetContext) => ActionSheet(
-        title: 'FILE ACTIONS',
+        title: basenameOf(file.name),
+        subtitle: formatBytes(file.size),
+        titleIsLabel: false,
         children: [
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('View information'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _showFileInformation(context, file);
+            },
+          ),
           ListTile(
             leading: const Icon(Icons.visibility_outlined),
             title: const Text('Preview'),
@@ -833,6 +951,52 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
       builder: (_) => isVideoName(file.name)
           ? _VideoPlaceholderDialog(file: file)
           : _PreviewDialog(name: file.name),
+    );
+  }
+
+  void _showFileInformation(BuildContext context, VaultFileInfo file) {
+    _showInformationDialog(
+      context,
+      location: file.name,
+      size: file.size,
+      type: vaultEntryType(file.name),
+      storageUsed: file.storageUsed,
+      createdAt: file.createdAt,
+      modifiedAt: file.modifiedAt,
+    );
+  }
+
+  void _showFolderInformation(BuildContext context, VaultFolder folder) {
+    _showInformationDialog(
+      context,
+      location: folder.path,
+      size: folder.size,
+      type: 'Folder',
+      storageUsed: folder.storageUsed,
+      createdAt: folder.createdAt,
+      modifiedAt: folder.modifiedAt,
+    );
+  }
+
+  void _showInformationDialog(
+    BuildContext context, {
+    required String location,
+    required int size,
+    required String type,
+    required int storageUsed,
+    required int createdAt,
+    required int modifiedAt,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => _InformationDialog(
+        location: location,
+        size: size,
+        type: type,
+        storageUsed: storageUsed,
+        createdAt: createdAt,
+        modifiedAt: modifiedAt,
+      ),
     );
   }
 
@@ -994,8 +1158,10 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
       );
       return null;
     }
-    await ref.read(vaultActionsProvider.notifier).createFolder(trimmed);
-    return _joinDir(ref, trimmed);
+    final created = await ref
+        .read(vaultActionsProvider.notifier)
+        .createFolder(trimmed);
+    return created ? _joinDir(ref, trimmed) : null;
   }
 
   Future<void> _renameFolderDialog(
@@ -1060,9 +1226,7 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Delete folder'),
         content: Text(
-          'Remove "${folder.name}" and its '
-          '${folder.childCount == 0 ? 'contents' : '${folder.childCount} items'} '
-          'from the vault?',
+          'Remove "${folder.name}" and all of its contents from the vault?',
         ),
         actions: [
           TextButton(
@@ -1121,6 +1285,10 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
       showSnack(context, 'Renames stay within the current folder.');
       return;
     }
+    if (isReservedEntryName(newName)) {
+      showSnack(context, 'The name ".ackeep" is reserved for folder markers.');
+      return;
+    }
     if (await _nameExists(ref, newName)) {
       if (!context.mounted) return;
       showSnack(
@@ -1158,6 +1326,62 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
     if (confirmed == true) {
       await notifier.delete(file.name);
     }
+  }
+}
+
+const _vaultLockAnimationDuration = Duration(milliseconds: 480);
+
+/// A root-overlay lock transition that remains visible while the browser is
+/// removed and the provider shell takes its place.
+class _VaultLockTransition extends StatelessWidget {
+  const _VaultLockTransition();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Positioned.fill(
+      child: AbsorbPointer(
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: 1),
+          duration: _vaultLockAnimationDuration,
+          builder: (context, progress, child) {
+            final appear = Curves.easeOutCubic.transform(
+              (progress / 0.55).clamp(0.0, 1.0),
+            );
+            final exit = Curves.easeInCubic.transform(
+              ((progress - 0.72) / 0.28).clamp(0.0, 1.0),
+            );
+            return ColoredBox(
+              color: scheme.surface.withValues(alpha: 1 - exit),
+              child: Center(
+                child: Opacity(
+                  opacity: appear * (1 - exit),
+                  child: Transform.scale(
+                    scale: 0.72 + (0.28 * appear),
+                    child: child,
+                  ),
+                ),
+              ),
+            );
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.lock_outline, size: 56, color: scheme.primary),
+              const SizedBox(height: 12),
+              Text(
+                'LOCKING VAULT',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  letterSpacing: 2,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -1504,6 +1728,92 @@ class _PreviewDialog extends ConsumerWidget {
           orElse: () => const <Widget>[],
         ),
       ],
+    );
+  }
+}
+
+class _InformationDialog extends StatelessWidget {
+  const _InformationDialog({
+    required this.location,
+    required this.size,
+    required this.type,
+    required this.storageUsed,
+    required this.createdAt,
+    required this.modifiedAt,
+  });
+
+  final String location;
+  final int size;
+  final String type;
+  final int storageUsed;
+  final int createdAt;
+  final int modifiedAt;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Information'),
+      content: SizedBox(
+        width: 440,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _InformationRow(label: 'Location', value: location),
+              _InformationRow(label: 'Size', value: formatBytes(size)),
+              _InformationRow(label: 'Type', value: type),
+              _InformationRow(
+                label: 'Storage used',
+                value: formatBytes(storageUsed),
+              ),
+              _InformationRow(
+                label: 'Created',
+                value: formatVaultTimestamp(createdAt),
+              ),
+              _InformationRow(
+                label: 'Modified',
+                value: formatVaultTimestamp(modifiedAt),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
+class _InformationRow extends StatelessWidget {
+  const _InformationRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 112,
+            child: Text(
+              label,
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(child: SelectableText(value)),
+        ],
+      ),
     );
   }
 }

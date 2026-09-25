@@ -20,11 +20,9 @@ packages:
   autocipher_dart:
     dependency: "direct main"
     description:
-      path: dart
-      ref: HEAD
-      resolved-ref: d33a7a4bda43406b737809eb21b70d800472eb55
-      url: "https://github.com/PlanetLOF/autocipher"
-    source: git
+      path: "../autocipher/dart"
+      relative: true
+    source: path
     version: "0.1.0"
   boolean_selector:
     dependency: transitive

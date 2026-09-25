@@ -22,6 +22,18 @@ String formatBytes(int bytes) {
   return '${gb.toStringAsFixed(2)} GB';
 }
 
+/// Format a Unix timestamp in seconds for the information dialog.
+String formatVaultTimestamp(int seconds) {
+  if (seconds <= 0) return 'Not recorded';
+  final value = DateTime.fromMillisecondsSinceEpoch(
+    seconds * Duration.millisecondsPerSecond,
+    isUtc: true,
+  ).toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${value.year}-${two(value.month)}-${two(value.day)} '
+      '${two(value.hour)}:${two(value.minute)}:${two(value.second)}';
+}
+
 /// The last path segment of `path`, accepting both `/` and `\` separators.
 String basenameOf(String path) {
   final i = path.lastIndexOf(RegExp(r'[/\\]'));

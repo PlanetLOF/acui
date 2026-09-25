@@ -56,7 +56,7 @@ class CurrentFolderNotifier extends Notifier<String> {
 final currentVaultFolderProvider =
     NotifierProvider<CurrentFolderNotifier, String>(CurrentFolderNotifier.new);
 
-/// The vault's plaintext file listing (name + size), re-read whenever the
+/// The vault's plaintext file listing and metadata, re-read whenever the
 /// session changes or after a mutation.
 final vaultFilesProvider = FutureProvider<List<VaultFileInfo>>((ref) async {
   return _watchSession(ref).listFiles();
@@ -179,6 +179,50 @@ final browserViewProvider =
       BrowserViewNotifier.new,
     );
 
+/// Persistent sort criterion and direction for the vault browser.
+class BrowserSortNotifier extends AsyncNotifier<VaultSortSettings> {
+  static const _criterionKey = 'browser_sort_criterion';
+  static const _descendingKey = 'browser_sort_descending';
+
+  @override
+  Future<VaultSortSettings> build() async {
+    final prefs = await SharedPreferences.getInstance();
+    final index = prefs.getInt(_criterionKey);
+    final criterion =
+        index != null && index >= 0 && index < VaultSort.values.length
+        ? VaultSort.values[index]
+        : VaultSort.name;
+    return VaultSortSettings(
+      criterion: criterion,
+      descending:
+          prefs.getBool(_descendingKey) ?? (criterion != VaultSort.name),
+    );
+  }
+
+  Future<void> selectSettings(VaultSortSettings value) async {
+    state = AsyncData(value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_criterionKey, value.criterion.index);
+    await prefs.setBool(_descendingKey, value.descending);
+  }
+
+  /// Choose a criterion with its conventional default direction.
+  Future<void> selectCriterion(VaultSort criterion) => selectSettings(
+    VaultSortSettings(
+      criterion: criterion,
+      descending: switch (criterion) {
+        VaultSort.name => false,
+        VaultSort.modified || VaultSort.size => true,
+      },
+    ),
+  );
+}
+
+final browserSortProvider =
+    AsyncNotifierProvider<BrowserSortNotifier, VaultSortSettings>(
+      BrowserSortNotifier.new,
+    );
+
 /// Busy flag + transient user-facing notices for vault mutations.
 class VaultActionsState {
   const VaultActionsState({this.busy = false, this.notice});
@@ -248,51 +292,148 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     try {
       final items = <({String src, String storedName})>[];
       final markers = <String>[];
+      final skippedReserved = <String>{};
 
       for (final p in cleaned) {
         final type = FileSystemEntity.typeSync(p, followLinks: false);
         if (type == FileSystemEntityType.directory) {
           final root = Directory(p.replaceAll(RegExp(r'[/\\]+$'), ''));
           final rootName = basenameOf(root.path);
+          if (containsReservedPathSegment(rootName)) {
+            skippedReserved.add(rootName);
+            continue;
+          }
 
           void visit(Directory d, String rel) {
             // `rel` is the stored path of this directory including the root
-            // name; `_childName` joins it under the current vault folder.
-            markers.add(_childName('$rel/$folderMarker'));
+            // name; `_childName` joins it under the current vault folder. Check
+            // the complete stored path too: legacy data can put the user in a
+            // folder whose own path contains `.ackeep`.
+            final storedDir = _childName(rel);
+            if (containsReservedPathSegment(storedDir)) {
+              skippedReserved.add(storedDir);
+              return;
+            }
+            markers.add('$storedDir/$folderMarker');
             for (final entity in d.listSync(followLinks: false)) {
               if (entity is Directory) {
-                visit(entity, '$rel/${basenameOf(entity.path)}');
+                final childRel = '$rel/${basenameOf(entity.path)}';
+                if (containsReservedPathSegment(childRel)) {
+                  skippedReserved.add(childRel);
+                } else {
+                  visit(entity, childRel);
+                }
               } else if (entity is File) {
-                items.add((
-                  src: entity.path,
-                  storedName: _childName('$rel/${basenameOf(entity.path)}'),
-                ));
+                final storedName = _childName(
+                  '$rel/${basenameOf(entity.path)}',
+                );
+                if (containsReservedPathSegment(storedName)) {
+                  skippedReserved.add(storedName);
+                } else {
+                  items.add((src: entity.path, storedName: storedName));
+                }
               }
             }
           }
 
           visit(root, rootName);
         } else if (type == FileSystemEntityType.file) {
-          items.add((src: p, storedName: _childName(basenameOf(p))));
+          final storedName = _childName(basenameOf(p));
+          if (containsReservedPathSegment(storedName)) {
+            skippedReserved.add(storedName);
+          } else {
+            items.add((src: p, storedName: storedName));
+          }
         }
       }
 
+      // Preflight all stored-name namespaces before importing any bytes. A
+      // marker must not be written beside a legacy file at its folder root (or
+      // beneath a file that already occupies the marker path), and a plain
+      // file must not create the same ambiguous file/folder pair. The indexes
+      // keep this linear in the number of paths rather than rescanning the
+      // complete vault listing for every incoming name.
+      final existing = {for (final f in await session.listFiles()) f.name};
+      final existingIndex = StoredPathIndex(existing);
+
+      // Directory traversal can encounter the same marker more than once when
+      // the host selection overlaps. De-duplicate it and reject any malformed
+      // marker/ancestor collision before considering the rest of the import.
+      final markerPaths = <String>[];
+      final markerPathIndex = StoredPathIndex();
+      for (final marker in markers) {
+        if (markerPathIndex.contains(marker)) continue;
+        if (markerPathIndex.conflictsWith(marker)) {
+          skippedReserved.add(marker);
+          continue;
+        }
+        markerPathIndex.add(marker);
+        markerPaths.add(marker);
+      }
+
+      final acceptedItems = <({String src, String storedName})>[];
+      final incomingIndex = StoredPathIndex();
+      for (final item in items) {
+        final name = item.storedName;
+        final exactExisting = existingIndex.contains(name);
+        final canOverwriteExistingFile =
+            exactExisting &&
+            !existingIndex.hasDescendant(name) &&
+            !existingIndex.hasAncestor(name);
+        if ((existingIndex.conflictsWith(name) && !canOverwriteExistingFile) ||
+            incomingIndex.conflictsWith(name) ||
+            markerPathIndex.conflictsWith(name)) {
+          skippedReserved.add(name);
+          continue;
+        }
+        acceptedItems.add(item);
+        incomingIndex.add(name);
+      }
+
+      final acceptedMarkers = <String>[];
+      final markersToWrite = <String>[];
+      for (final marker in markerPaths) {
+        // An already-present marker is idempotent; do not report it as a
+        // skipped name. Any other namespace collision is preserved, not
+        // overwritten.
+        if (existingIndex.contains(marker)) {
+          acceptedMarkers.add(marker);
+          continue;
+        }
+        if (existingIndex.conflictsWith(marker) ||
+            incomingIndex.conflictsWith(marker)) {
+          skippedReserved.add(marker);
+          continue;
+        }
+        acceptedMarkers.add(marker);
+        markersToWrite.add(marker);
+      }
+
       var count = 0;
-      if (items.isNotEmpty) {
-        count = await session.addPaths(items);
+      if (acceptedItems.isNotEmpty) {
+        count = await session.addPaths(acceptedItems);
       }
-      // Markers are idempotent (overwrite in place), so re-importing a folder
-      // never duplicates empty-directory entries.
-      for (final m in markers) {
-        await session.put(m, Uint8List(0));
+      for (final marker in markersToWrite) {
+        await session.put(marker, Uint8List(0));
       }
+      final markerCount = acceptedMarkers.length;
       await _reload();
-      if (items.isEmpty && markers.isEmpty) {
-        _notice('No files or folders to import in the selection.');
-      } else if (items.isEmpty) {
-        _notice('Imported an empty folder.');
+      final skippedText = skippedReserved.isEmpty
+          ? ''
+          : ' Skipped ${skippedReserved.length} reserved or conflicting '
+                'name${skippedReserved.length == 1 ? '' : 's'}: '
+                '${skippedReserved.take(3).join(', ')}'
+                '${skippedReserved.length > 3 ? ', ...' : ''}.';
+      if (acceptedItems.isEmpty && markerCount == 0) {
+        if (skippedReserved.isEmpty) {
+          _notice('No files or folders to import in the selection.');
+        } else {
+          _notice('Nothing imported.$skippedText');
+        }
+      } else if (acceptedItems.isEmpty) {
+        _notice('Imported an empty folder.$skippedText');
       } else {
-        _notice('Imported ${_plural(count, 'file')}.');
+        _notice('Imported ${_plural(count, 'file')}.$skippedText');
       }
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
@@ -302,17 +443,38 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
   }
 
   /// Create an empty folder in the current vault folder via a hidden marker.
-  Future<void> createFolder(String name) async {
-    if (state.busy) return;
+  /// Returns whether the marker was written and the listing reloaded.
+  Future<bool> createFolder(String name) async {
+    if (state.busy) return false;
+    if (!isValidFolderName(name)) {
+      _notice('Invalid folder name.');
+      return false;
+    }
     final session = _session;
-    if (session == null) return;
+    if (session == null) return false;
+    final folderPath = _childName(name);
+    if (containsReservedPathSegment(folderPath)) {
+      _notice('The name ".ackeep" is reserved for folder markers.');
+      return false;
+    }
     _setBusy(true);
     try {
-      await session.put(_childName('$name/$folderMarker'), Uint8List(0));
+      final marker = '$folderPath/$folderMarker';
+      final existing = {for (final f in await session.listFiles()) f.name};
+      final conflicts = existing.any(
+        (stored) => storedPathsConflict(stored, folderPath),
+      );
+      if (conflicts) {
+        _notice('A file or folder named "$name" already exists here.');
+        return false;
+      }
+      await session.put(marker, Uint8List(0));
       await _reload();
       _notice('Created folder "$name".');
+      return true;
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
+      return false;
     } finally {
       _setBusy(false);
     }
@@ -322,23 +484,60 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
   /// every stored name under the prefix are renamed.
   Future<void> renameFolder(String path, String newName) async {
     if (state.busy) return;
+    if (!isValidFolderName(newName)) {
+      _notice('Invalid folder name.');
+      return;
+    }
     final session = _session;
     if (session == null) return;
     _setBusy(true);
     try {
       final parent = parentOfPath(path);
       final newPath = parent.isEmpty ? newName : '$parent/$newName';
+      if (newPath == path) {
+        _notice('Folder name is unchanged.');
+        return;
+      }
+      if (containsReservedPathSegment(newPath)) {
+        _notice('The name ".ackeep" is reserved for folder markers.');
+        return;
+      }
+
       final oldPrefix = '$path/';
-      final affected = await _namesUnder(session, oldPrefix);
+      final existing = {for (final f in await session.listFiles()) f.name};
+      final affected = existing
+          .where((name) => name.startsWith(oldPrefix))
+          .toList();
       if (affected.isEmpty) {
         _notice('Folder not found.');
         return;
       }
+
+      final renames = <({String oldName, String newName})>[];
       for (final name in affected) {
-        await session.rename(
-          name,
-          '$newPath/${name.substring(oldPrefix.length)}',
-        );
+        final next = '$newPath/${name.substring(oldPrefix.length)}';
+        if (!isFolderMarker(name) && containsReservedPathSegment(next)) {
+          _notice('The name ".ackeep" is reserved for folder markers.');
+          return;
+        }
+        renames.add((oldName: name, newName: next));
+      }
+
+      // Every planned leaf is below `newPath`, so a non-moving name that
+      // conflicts with any leaf also conflicts with the destination root.
+      // Checking the root once avoids an O(files × existing-names) preflight
+      // while retaining the same namespace guarantee. This also catches a
+      // legacy user file at `<new>/.ackeep`.
+      for (final name in existing) {
+        if (name.startsWith(oldPrefix)) continue;
+        if (storedPathsConflict(name, newPath)) {
+          _notice('A file or folder named "$newName" already exists here.');
+          return;
+        }
+      }
+
+      for (final rename in renames) {
+        await session.rename(rename.oldName, rename.newName);
       }
       await _reload();
       _notice('Renamed folder to "$newName".');
@@ -457,8 +656,25 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     if (state.busy) return;
     final session = _session;
     if (session == null) return;
+    if (oldName == newName) return;
+    if (newName.isEmpty) {
+      _notice('Invalid file name.');
+      return;
+    }
+    if (containsReservedPathSegment(newName) && !isFolderMarker(oldName)) {
+      _notice('The name ".ackeep" is reserved for folder markers.');
+      return;
+    }
     _setBusy(true);
     try {
+      final existing = {for (final f in await session.listFiles()) f.name};
+      final conflict = existing.any(
+        (name) => name != oldName && storedPathsConflict(name, newName),
+      );
+      if (conflict) {
+        _notice('A file or folder named "$newName" already exists.');
+        return;
+      }
       await session.rename(oldName, newName);
       await _reload();
       _notice('Renamed to $newName.');
@@ -505,7 +721,18 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
       folderPaths: folderPaths,
       destPath: destPath,
     )) {
-      _notice('Cannot move an item into itself or its current folder.');
+      final alreadyInDestination =
+          fileNames.any((name) => parentOfPath(name) == destPath) ||
+          folderPaths.any((name) => parentOfPath(name) == destPath);
+      if (alreadyInDestination) {
+        final target = destPath.isEmpty ? 'the vault root' : '"$destPath"';
+        _notice('Cannot move an item that is already in $target.');
+      } else {
+        _notice(
+          'Cannot move overlapping entries, an item into itself or a descendant, '
+          'or anything through the reserved folder-marker namespace.',
+        );
+      }
       return false;
     }
     final session = _session;
@@ -535,15 +762,14 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
         _notice('Nothing to move.');
         return false;
       }
-      // Every destination must be free. A name that is being moved away no
-      // longer counts as occupied, but descendants of a destination folder
-      // do: a file cannot be moved into an existing folder with the same name.
-      // Checking the planned top-level roots also catches an existing file at
-      // the root of a folder destination (for example `B/A` while moving `A`
-      // into `B`).
+      // Every planned leaf must be free. A name that is being moved away no
+      // longer counts as occupied in the existing listing, but it is still
+      // checked against every destination so sequential renames cannot depend
+      // on ordering. Checking all leaves also catches duplicate and nested
+      // destinations that a set of top-level roots would collapse.
       final existing = {for (final f in await session.listFiles()) f.name};
       final movedNames = {for (final r in renames) r.oldName};
-      final destinationRoots = <String>{};
+      final destinationRoots = <String>[];
       for (final name in fileNames) {
         final rel = basenameOf(name);
         destinationRoots.add(destPath.isEmpty ? rel : '$destPath/$rel');
@@ -552,25 +778,22 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
         final rel = basenameOf(folder);
         destinationRoots.add(destPath.isEmpty ? rel : '$destPath/$rel');
       }
+      final conflict = moveDestinationConflict(
+        existingNames: existing,
+        movedNames: movedNames,
+        plannedNames: renames.map((rename) => rename.newName),
+      );
       String? conflictRoot;
-      for (final root in destinationRoots) {
-        final conflict = existing.any((name) {
-          if (movedNames.contains(name)) return false;
-          return name == root ||
-              name.startsWith('$root/') ||
-              root.startsWith('$name/');
-        });
-        if (conflict) {
-          conflictRoot = root;
-          break;
-        }
-        for (final other in destinationRoots) {
-          if (other != root && other.startsWith('$root/')) {
+      if (conflict != null) {
+        // Report the user-facing top-level destination rather than a marker or
+        // nested leaf when the conflict is inside a moved folder.
+        for (final root in destinationRoots) {
+          if (storedPathsConflict(root, conflict)) {
             conflictRoot = root;
             break;
           }
         }
-        if (conflictRoot != null) break;
+        conflictRoot ??= conflict;
       }
       if (conflictRoot != null) {
         final target = destPath.isEmpty ? 'vault root' : destPath;
