@@ -15,10 +15,11 @@ flutter_rust_bridge, no cargokit, no gRPC, no sidecar process.
 - `lib/provider/` — riverpod state: the open `Vault` (`vaultSessionProvider`),
   connection-tab selection, file dialogs, random-password generation.
 - `lib/ui/` — provider-tab entry (FTP/FTPS, SFTP/SSH, local create/open), the
-  vault browser (import/extract/preview/rename/delete), and settings (change
+  vault browser (import/extract/preview/rename/delete/move), and settings (change
   password, compact, remirror, container info). Import accepts files and
   folders both from the native dialogs and by dragging them onto the browser
-  (drop lands in the folder you're currently viewing).
+  (drop lands in the folder you're currently viewing). Files and folders can
+  also be dragged onto visible vault folders to move them.
 - `lib/ui/preview.dart` — pure-Dart preview-kind detection (image / SVG /
   video / text / binary), plus the image/video-name helpers that drive the
   grid & list thumbnails. Raster files show real thumbnails; video files show

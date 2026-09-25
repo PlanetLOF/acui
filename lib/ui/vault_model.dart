@@ -153,6 +153,28 @@ Set<String> allFolderPaths(List<VaultFileInfo> files) {
   return paths;
 }
 
+/// Whether the selected entries can be moved into [destPath].
+///
+/// Stored names are flat and folders are represented by path prefixes, so a
+/// source entry's parent is the destination at which it already lives. A
+/// folder also cannot be moved into itself or any of its descendants.
+bool canMoveEntries({
+  required Iterable<String> fileNames,
+  required Iterable<String> folderPaths,
+  required String destPath,
+}) {
+  if (fileNames.isEmpty && folderPaths.isEmpty) return false;
+
+  for (final name in fileNames) {
+    if (parentOfPath(name) == destPath) return false;
+  }
+  for (final folder in folderPaths) {
+    if (parentOfPath(folder) == destPath) return false;
+    if (destPath == folder || destPath.startsWith('$folder/')) return false;
+  }
+  return true;
+}
+
 /// Folder-name validation shared by the create/rename dialogs: non-empty, not
 /// `.`/`..`, and no path separators (a folder is one segment).
 bool isValidFolderName(String name) {

@@ -68,6 +68,84 @@ void main() {
     });
   });
 
+  group('move destination validation', () {
+    test('allows a file to move into a different folder', () {
+      expect(
+        canMoveEntries(
+          fileNames: ['Notes/todo.txt'],
+          folderPaths: const [],
+          destPath: 'Archive',
+        ),
+        isTrue,
+      );
+    });
+
+    test('rejects no-op moves and folder descendants', () {
+      expect(
+        canMoveEntries(
+          fileNames: ['Notes/todo.txt'],
+          folderPaths: const [],
+          destPath: 'Notes',
+        ),
+        isFalse,
+      );
+      expect(
+        canMoveEntries(
+          fileNames: const [],
+          folderPaths: const ['Photos'],
+          destPath: 'Photos/2024',
+        ),
+        isFalse,
+      );
+      expect(
+        canMoveEntries(
+          fileNames: const [],
+          folderPaths: const ['Photos'],
+          destPath: 'Photos',
+        ),
+        isFalse,
+      );
+      expect(
+        canMoveEntries(
+          fileNames: const [],
+          folderPaths: const ['Notes/2024'],
+          destPath: 'Notes',
+        ),
+        isFalse,
+      );
+    });
+
+    test('allows a nested item to move to the vault root', () {
+      expect(
+        canMoveEntries(
+          fileNames: ['Notes/todo.txt'],
+          folderPaths: const [],
+          destPath: '',
+        ),
+        isTrue,
+      );
+      expect(
+        canMoveEntries(
+          fileNames: const [],
+          folderPaths: const ['Notes/2024'],
+          destPath: '',
+        ),
+        isTrue,
+      );
+    });
+
+    test('rejects an empty selection', () {
+      expect(
+        canMoveEntries(
+          fileNames: const [],
+          folderPaths: const [],
+          destPath: 'Notes',
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('entry keys', () {
     test('file and folder keys are prefix-distinct', () {
       final file = buildBrowserEntries(filesOf(['a.txt']), '')[0];

@@ -12,7 +12,8 @@
 //
 // File pickers come from `FileService` (file_selector); the whole browser
 // body is also a drop zone (`_ImportDropZone`) that imports dragged files and
-// folders through the same `importPaths` code path.
+// folders through the same `importPaths` code path. Vault entries themselves
+// are draggable onto visible folder targets to move them within the vault.
 
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -213,6 +214,86 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
     ref.read(currentVaultFolderProvider.notifier).go(path);
   }
 
+  /// Build the payload for a drag source. A selected item carries the whole
+  /// current selection; dragging an unselected item carries just that item.
+  _VaultDragData _dragDataFor(VaultBrowserEntry entry) {
+    if (_selected.contains(entry.key) && _selected.isNotEmpty) {
+      return _VaultDragData(
+        fileNames: _selectedFiles,
+        folderPaths: _selectedFolders,
+        label: '${_selected.length} selected',
+        isSelection: true,
+      );
+    }
+    if (entry.isFolder) {
+      return _VaultDragData(
+        fileNames: const [],
+        folderPaths: [entry.folder!.path],
+        label: entry.displayName,
+      );
+    }
+    return _VaultDragData(
+      fileNames: [entry.file!.name],
+      folderPaths: const [],
+      label: entry.displayName,
+    );
+  }
+
+  bool _canDrop(_VaultDragData data, String destPath) {
+    if (ref.read(vaultActionsProvider).busy) return false;
+    return canMoveEntries(
+      fileNames: data.fileNames,
+      folderPaths: data.folderPaths,
+      destPath: destPath,
+    );
+  }
+
+  Future<void> _moveDragged(_VaultDragData data, String destPath) async {
+    if (!mounted || !_canDrop(data, destPath)) return;
+    final moved = await ref
+        .read(vaultActionsProvider.notifier)
+        .moveEntries(
+          fileNames: data.fileNames,
+          folderPaths: data.folderPaths,
+          destPath: destPath,
+        );
+    if (moved && mounted && data.isSelection) _clearSelection();
+  }
+
+  Widget _wrapEntryDrag(
+    VaultBrowserEntry entry,
+    Widget child, {
+    required bool enabled,
+  }) {
+    final data = _dragDataFor(entry);
+    return Draggable<_VaultDragData>(
+      data: data,
+      // Let vertical pointer motion remain a list/grid scroll gesture. Once
+      // a horizontal drag starts, the feedback can move in either direction.
+      affinity: Axis.horizontal,
+      maxSimultaneousDrags: enabled ? 1 : 0,
+      feedback: _DragFeedback(data: data),
+      childWhenDragging: Opacity(opacity: 0.35, child: child),
+      child: child,
+    );
+  }
+
+  Widget _wrapFolderDropTarget({required String path, required Widget child}) {
+    return DragTarget<_VaultDragData>(
+      onWillAcceptWithDetails: (details) => _canDrop(details.data, path),
+      onAcceptWithDetails: (details) async {
+        await _moveDragged(details.data, path);
+      },
+      builder: (context, candidateData, rejectedData) {
+        return _VaultDropHighlight(
+          active: candidateData.isNotEmpty,
+          rejected: rejectedData.isNotEmpty,
+          child: child,
+        );
+      },
+    );
+  }
+
   void _refresh(WidgetRef ref) {
     ref.invalidate(vaultFilesProvider);
     ref.invalidate(vaultInfoProvider);
@@ -292,7 +373,7 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
         final entry = entries[index];
         final selected = _selected.contains(entry.key);
         if (_selectionMode) {
-          return ListTile(
+          final tile = ListTile(
             leading: entry.isFolder
                 ? const Icon(Icons.folder_outlined)
                 : _FileLeading(file: entry.file!),
@@ -316,10 +397,17 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
             onTap: () => _toggleSelection(entry),
             onLongPress: () => _toggleSelection(entry),
           );
+          return _wrapEntryDrag(
+            entry,
+            entry.isFolder
+                ? _wrapFolderDropTarget(path: entry.folder!.path, child: tile)
+                : tile,
+            enabled: !ref.read(vaultActionsProvider).busy,
+          );
         }
         if (entry.isFolder) {
           final folder = entry.folder!;
-          return ListTile(
+          final tile = ListTile(
             leading: const Icon(Icons.folder_outlined),
             title: Text(folder.name),
             subtitle: Text(
@@ -341,9 +429,14 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
               });
             },
           );
+          return _wrapEntryDrag(
+            entry,
+            _wrapFolderDropTarget(path: folder.path, child: tile),
+            enabled: !ref.read(vaultActionsProvider).busy,
+          );
         }
         final file = entry.file!;
-        return ListTile(
+        final tile = ListTile(
           leading: _FileLeading(file: file),
           title: Text(entry.displayName),
           subtitle: Text(formatBytes(file.size)),
@@ -359,6 +452,11 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
               _selected.add(entry.key);
             });
           },
+        );
+        return _wrapEntryDrag(
+          entry,
+          tile,
+          enabled: !ref.read(vaultActionsProvider).busy,
         );
       },
     );
@@ -388,7 +486,7 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
                   : '${entry.folder!.childCount} '
                         '${entry.folder!.childCount == 1 ? 'item' : 'items'}')
             : formatBytes(entry.file!.size);
-        return Card(
+        final card = Card(
           clipBehavior: Clip.antiAlias,
           color: selected
               ? scheme.secondaryContainer.withValues(alpha: 0.45)
@@ -465,6 +563,13 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
               ],
             ),
           ),
+        );
+        return _wrapEntryDrag(
+          entry,
+          entry.isFolder
+              ? _wrapFolderDropTarget(path: entry.folder!.path, child: card)
+              : card,
+          enabled: !ref.read(vaultActionsProvider).busy,
         );
       },
     );
@@ -839,15 +944,15 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
       if (created == null) return false;
       destPath = created;
     }
-    await ref
+    final moved = await ref
         .read(vaultActionsProvider.notifier)
         .moveEntries(
           fileNames: fileNames,
           folderPaths: folderPaths,
           destPath: destPath,
         );
-    _clearSelection();
-    return true;
+    if (moved) _clearSelection();
+    return moved;
   }
 
   Future<String?> _newFolderDialog(BuildContext context, WidgetRef ref) async {
@@ -1053,6 +1158,112 @@ class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
     if (confirmed == true) {
       await notifier.delete(file.name);
     }
+  }
+}
+
+/// The data carried by an internal vault-item drag. File names and folder
+/// paths are kept separately because folders expand to their complete stored
+/// subtree in [VaultActionsNotifier.moveEntries].
+class _VaultDragData {
+  _VaultDragData({
+    required List<String> fileNames,
+    required List<String> folderPaths,
+    required this.label,
+    this.isSelection = false,
+  }) : fileNames = List.unmodifiable(fileNames),
+       folderPaths = List.unmodifiable(folderPaths);
+
+  final List<String> fileNames;
+  final List<String> folderPaths;
+  final String label;
+  final bool isSelection;
+}
+
+/// Compact feedback shown under the pointer while an item is being dragged.
+class _DragFeedback extends StatelessWidget {
+  const _DragFeedback({required this.data});
+
+  final _VaultDragData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 280),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black26,
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.drive_file_move_outlined,
+                  color: scheme.primary,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    data.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Highlights a valid folder destination while an internal drag hovers over
+/// it. Invalid targets get a subdued error treatment so a rejected drop is
+/// visible rather than silently ignored.
+class _VaultDropHighlight extends StatelessWidget {
+  const _VaultDropHighlight({
+    required this.active,
+    required this.rejected,
+    required this.child,
+  });
+
+  final bool active;
+  final bool rejected;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = active ? scheme.primary : (rejected ? scheme.error : null);
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      decoration: color == null
+          ? null
+          : BoxDecoration(
+              color: active
+                  ? scheme.primary.withValues(alpha: 0.10)
+                  : scheme.error.withValues(alpha: 0.06),
+              border: Border.all(color: color, width: 2),
+              borderRadius: BorderRadius.circular(10),
+            ),
+      child: child,
+    );
   }
 }
 

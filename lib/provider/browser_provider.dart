@@ -490,18 +490,26 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
   /// folder prefix, so file ids / chunk bindings are preserved — a move is a
   /// rename within the vault, never a re-encrypt.
   ///
-  /// No-op renames are skipped and destination collisions are validated
-  /// up front, so a conflicting name aborts the whole move before anything
-  /// is touched.
-  Future<void> moveEntries({
+  /// No-op and impossible destinations are rejected up front, and destination
+  /// collisions are validated before any rename so a conflict aborts the whole
+  /// move without partially moving it.
+  Future<bool> moveEntries({
     required List<String> fileNames,
     required List<String> folderPaths,
     required String destPath,
   }) async {
-    if (state.busy) return;
-    if (fileNames.isEmpty && folderPaths.isEmpty) return;
+    if (state.busy) return false;
+    if (fileNames.isEmpty && folderPaths.isEmpty) return false;
+    if (!canMoveEntries(
+      fileNames: fileNames,
+      folderPaths: folderPaths,
+      destPath: destPath,
+    )) {
+      _notice('Cannot move an item into itself or its current folder.');
+      return false;
+    }
     final session = _session;
-    if (session == null) return;
+    if (session == null) return false;
     _setBusy(true);
     try {
       final renames = <({String oldName, String newName})>[];
@@ -525,21 +533,52 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
       }
       if (renames.isEmpty) {
         _notice('Nothing to move.');
-        return;
+        return false;
       }
-      // Every destination must be free (a name that is being moved away no
-      // longer counts as occupied).
+      // Every destination must be free. A name that is being moved away no
+      // longer counts as occupied, but descendants of a destination folder
+      // do: a file cannot be moved into an existing folder with the same name.
+      // Checking the planned top-level roots also catches an existing file at
+      // the root of a folder destination (for example `B/A` while moving `A`
+      // into `B`).
       final existing = {for (final f in await session.listFiles()) f.name};
       final movedNames = {for (final r in renames) r.oldName};
-      for (final r in renames) {
-        if (existing.contains(r.newName) && !movedNames.contains(r.newName)) {
-          final target = destPath.isEmpty ? 'vault root' : destPath;
-          _notice(
-            'Cannot move "${basenameOf(r.newName)}": a file or folder named '
-            '"${basenameOf(r.newName)}" already exists in $target.',
-          );
-          return;
+      final destinationRoots = <String>{};
+      for (final name in fileNames) {
+        final rel = basenameOf(name);
+        destinationRoots.add(destPath.isEmpty ? rel : '$destPath/$rel');
+      }
+      for (final folder in folderPaths) {
+        final rel = basenameOf(folder);
+        destinationRoots.add(destPath.isEmpty ? rel : '$destPath/$rel');
+      }
+      String? conflictRoot;
+      for (final root in destinationRoots) {
+        final conflict = existing.any((name) {
+          if (movedNames.contains(name)) return false;
+          return name == root ||
+              name.startsWith('$root/') ||
+              root.startsWith('$name/');
+        });
+        if (conflict) {
+          conflictRoot = root;
+          break;
         }
+        for (final other in destinationRoots) {
+          if (other != root && other.startsWith('$root/')) {
+            conflictRoot = root;
+            break;
+          }
+        }
+        if (conflictRoot != null) break;
+      }
+      if (conflictRoot != null) {
+        final target = destPath.isEmpty ? 'vault root' : destPath;
+        _notice(
+          'Cannot move "${basenameOf(conflictRoot)}": a file or folder named '
+          '"${basenameOf(conflictRoot)}" already exists in $target.',
+        );
+        return false;
       }
       for (final r in renames) {
         await session.rename(r.oldName, r.newName);
@@ -548,8 +587,10 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
       _notice(
         'Moved ${_plural(fileNames.length + folderPaths.length, 'item')}.',
       );
+      return true;
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
+      return false;
     } finally {
       _setBusy(false);
     }
