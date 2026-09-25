@@ -1,12 +1,14 @@
 // The vault browser: browse plaintext entries in folders (derived from stored
 // name prefixes, with `.ackeep` markers persisting empty folders), import from
-// the host filesystem, extract / preview / rename / delete individual files and
-// folders, toggle list/grid view, and open settings.
+// the host filesystem, extract / preview / rename / delete / move individual
+// files and folders, multi-select (move / extract / delete), toggle
+// list/grid view, and open settings.
 //
 // The scene is mounted by the app shell whenever a vault session is open.
 // Every engine operation is dispatched through the vault providers on a
-// worker isolate, so this widget is a pure consumer of Riverpod state — no
-// local mutable state beyond the transient file dialogs.
+// worker isolate, so this widget is a pure consumer of Riverpod state; the
+// only local state is the transient selection set for bulk actions and the
+// file dialogs.
 //
 // File pickers come from `FileService` (file_selector); the whole browser
 // body is also a drop zone (`_ImportDropZone`) that imports dragged files and
@@ -30,11 +32,52 @@ import 'vault_model.dart';
 import 'vault_settings_sheet.dart';
 
 /// The open vault's file browser.
-class VaultBrowserScreen extends ConsumerWidget {
+class VaultBrowserScreen extends ConsumerStatefulWidget {
   const VaultBrowserScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<VaultBrowserScreen> createState() => _VaultBrowserScreenState();
+}
+
+class _VaultBrowserScreenState extends ConsumerState<VaultBrowserScreen> {
+  /// Keys of the entries selected for bulk actions (`VaultBrowserEntry.key`).
+  final Set<String> _selected = {};
+
+  /// True while the multi-select toolbar is active (long-press or the Select
+  /// app-bar button turns it on; X or an empty selection turns it off).
+  bool _selectionMode = false;
+
+  static const String _fileKeyPrefix = 'file:';
+  static const String _folderKeyPrefix = 'folder:';
+
+  List<String> get _selectedFiles => [
+    for (final k in _selected)
+      if (k.startsWith(_fileKeyPrefix)) k.substring(_fileKeyPrefix.length),
+  ];
+
+  List<String> get _selectedFolders => [
+    for (final k in _selected)
+      if (k.startsWith(_folderKeyPrefix)) k.substring(_folderKeyPrefix.length),
+  ];
+
+  void _toggleSelection(VaultBrowserEntry entry) {
+    setState(() {
+      if (!_selected.add(entry.key)) {
+        _selected.remove(entry.key);
+        if (_selected.isEmpty) _selectionMode = false;
+      }
+    });
+  }
+
+  void _clearSelection() {
+    setState(() {
+      _selected.clear();
+      _selectionMode = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final files = ref.watch(vaultFilesProvider);
     final info = ref.watch(vaultInfoProvider);
     final actions = ref.watch(vaultActionsProvider);
@@ -55,61 +98,88 @@ class VaultBrowserScreen extends ConsumerWidget {
       orElse: () => 'Vault',
     );
 
+    // The visible rows double as the select-all universe in selection mode.
+    final entries = files.maybeWhen(
+      data: (list) => buildBrowserEntries(list, dir),
+      orElse: () => const <VaultBrowserEntry>[],
+    );
+
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          inFolder ? dir : vaultName,
+          _selectionMode
+              ? '${_selected.length} selected'
+              : (inFolder ? dir : vaultName),
           overflow: TextOverflow.ellipsis,
         ),
         leading: IconButton(
-          tooltip: inFolder ? 'Up' : 'Lock vault',
+          tooltip: _selectionMode
+              ? 'Exit selection'
+              : (inFolder ? 'Up' : 'Lock vault'),
           onPressed: actions.busy
               ? null
               : () {
-                  if (inFolder) {
+                  if (_selectionMode) {
+                    _clearSelection();
+                  } else if (inFolder) {
                     _goUp(ref, dir);
                   } else {
                     ref.read(vaultSessionProvider.notifier).close();
                   }
                 },
-          icon: Icon(inFolder ? Icons.arrow_back : Icons.lock_outline),
+          icon: Icon(
+            _selectionMode
+                ? Icons.close
+                : (inFolder ? Icons.arrow_back : Icons.lock_outline),
+          ),
         ),
-        actions: [
-          IconButton(
-            tooltip: 'New folder',
-            onPressed: actions.busy
-                ? null
-                : () => _newFolderDialog(context, ref),
-            icon: const Icon(Icons.create_new_folder_outlined),
-          ),
-          IconButton(
-            tooltip: view == BrowserView.grid ? 'List view' : 'Grid view',
-            onPressed: actions.busy
-                ? null
-                : () => ref
-                      .read(browserViewProvider.notifier)
-                      .select(
-                        view == BrowserView.grid
-                            ? BrowserView.list
-                            : BrowserView.grid,
-                      ),
-            icon: Icon(
-              view == BrowserView.grid
-                  ? Icons.view_list_outlined
-                  : Icons.grid_view_outlined,
-            ),
-          ),
-          IconButton(
-            tooltip: 'Refresh',
-            onPressed: actions.busy ? null : () => _refresh(ref),
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            onPressed: actions.busy ? null : () => showVaultSettings(context),
-            icon: const Icon(Icons.settings_outlined),
-          ),
-        ],
+        actions: _selectionMode
+            ? _buildSelectionActions(context, ref, actions, entries)
+            : [
+                IconButton(
+                  tooltip: 'Select',
+                  onPressed: actions.busy
+                      ? null
+                      : () => setState(() => _selectionMode = true),
+                  icon: const Icon(Icons.checklist),
+                ),
+                IconButton(
+                  tooltip: 'New folder',
+                  onPressed: actions.busy
+                      ? null
+                      : () => _newFolderDialog(context, ref),
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                ),
+                IconButton(
+                  tooltip: view == BrowserView.grid ? 'List view' : 'Grid view',
+                  onPressed: actions.busy
+                      ? null
+                      : () => ref
+                            .read(browserViewProvider.notifier)
+                            .select(
+                              view == BrowserView.grid
+                                  ? BrowserView.list
+                                  : BrowserView.grid,
+                            ),
+                  icon: Icon(
+                    view == BrowserView.grid
+                        ? Icons.view_list_outlined
+                        : Icons.grid_view_outlined,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh',
+                  onPressed: actions.busy ? null : () => _refresh(ref),
+                  icon: const Icon(Icons.refresh),
+                ),
+                IconButton(
+                  tooltip: 'Settings',
+                  onPressed: actions.busy
+                      ? null
+                      : () => showVaultSettings(context),
+                  icon: const Icon(Icons.settings_outlined),
+                ),
+              ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: actions.busy ? null : () => _showImportMenu(context, ref),
@@ -127,7 +197,7 @@ class VaultBrowserScreen extends ConsumerWidget {
               folderLabel: inFolder ? dir : 'vault root',
               onDrop: (paths) =>
                   ref.read(vaultActionsProvider.notifier).importPaths(paths),
-              child: _buildBody(context, ref, files, dir, view),
+              child: _buildBody(context, ref, files, entries, dir, view),
             ),
           ),
         ],
@@ -158,6 +228,7 @@ class VaultBrowserScreen extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     AsyncValue<List<VaultFileInfo>> files,
+    List<VaultBrowserEntry> entries,
     String dir,
     BrowserView view,
   ) {
@@ -189,7 +260,6 @@ class VaultBrowserScreen extends ConsumerWidget {
             subtitle: '…or tap IMPORT to pick files or a folder.',
           );
         }
-        final entries = buildBrowserEntries(list, dir);
         if (entries.isEmpty) {
           return const _EmptyDropHint(
             icon: Icons.folder_open,
@@ -212,6 +282,7 @@ class VaultBrowserScreen extends ConsumerWidget {
     WidgetRef ref,
     List<VaultBrowserEntry> entries,
   ) {
+    final scheme = Theme.of(context).colorScheme;
     return ListView.builder(
       // Clearance so the floating IMPORT button never covers the last row's
       // Actions (⋯) popup.
@@ -219,6 +290,33 @@ class VaultBrowserScreen extends ConsumerWidget {
       itemCount: entries.length,
       itemBuilder: (context, index) {
         final entry = entries[index];
+        final selected = _selected.contains(entry.key);
+        if (_selectionMode) {
+          return ListTile(
+            leading: entry.isFolder
+                ? const Icon(Icons.folder_outlined)
+                : _FileLeading(file: entry.file!),
+            title: Text(entry.displayName),
+            subtitle: Text(
+              entry.isFolder
+                  ? (entry.folder!.childCount == 0
+                        ? 'Empty'
+                        : '${entry.folder!.childCount} '
+                              '${entry.folder!.childCount == 1 ? 'item' : 'items'}')
+                  : formatBytes(entry.file!.size),
+            ),
+            selected: selected,
+            selectedTileColor: scheme.secondaryContainer.withValues(
+              alpha: 0.35,
+            ),
+            trailing: Checkbox(
+              value: selected,
+              onChanged: (_) => _toggleSelection(entry),
+            ),
+            onTap: () => _toggleSelection(entry),
+            onLongPress: () => _toggleSelection(entry),
+          );
+        }
         if (entry.isFolder) {
           final folder = entry.folder!;
           return ListTile(
@@ -236,6 +334,12 @@ class VaultBrowserScreen extends ConsumerWidget {
               icon: const Icon(Icons.more_vert),
             ),
             onTap: () => _enterFolder(ref, folder.path),
+            onLongPress: () {
+              setState(() {
+                _selectionMode = true;
+                _selected.add(entry.key);
+              });
+            },
           );
         }
         final file = entry.file!;
@@ -249,6 +353,12 @@ class VaultBrowserScreen extends ConsumerWidget {
             icon: const Icon(Icons.more_vert),
           ),
           onTap: () => _preview(context, ref, file),
+          onLongPress: () {
+            setState(() {
+              _selectionMode = true;
+              _selected.add(entry.key);
+            });
+          },
         );
       },
     );
@@ -259,6 +369,7 @@ class VaultBrowserScreen extends ConsumerWidget {
     WidgetRef ref,
     List<VaultBrowserEntry> entries,
   ) {
+    final scheme = Theme.of(context).colorScheme;
     return GridView.builder(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
@@ -270,6 +381,7 @@ class VaultBrowserScreen extends ConsumerWidget {
       itemCount: entries.length,
       itemBuilder: (context, index) {
         final entry = entries[index];
+        final selected = _selected.contains(entry.key);
         final String subtitle = entry.isFolder
             ? (entry.folder!.childCount == 0
                   ? 'Empty'
@@ -278,24 +390,59 @@ class VaultBrowserScreen extends ConsumerWidget {
             : formatBytes(entry.file!.size);
         return Card(
           clipBehavior: Clip.antiAlias,
+          color: selected
+              ? scheme.secondaryContainer.withValues(alpha: 0.45)
+              : null,
           child: InkWell(
             onTap: () {
-              if (entry.isFolder) {
+              if (_selectionMode) {
+                _toggleSelection(entry);
+              } else if (entry.isFolder) {
                 _enterFolder(ref, entry.folder!.path);
               } else {
                 _preview(context, ref, entry.file!);
               }
             },
             onLongPress: () {
-              if (entry.isFolder) {
-                _showFolderActions(context, ref, entry.folder!);
+              if (_selectionMode) {
+                _toggleSelection(entry);
               } else {
-                _showFileActions(context, ref, entry.file!);
+                setState(() {
+                  _selectionMode = true;
+                  _selected.add(entry.key);
+                });
               }
             },
             child: Column(
               children: [
-                Expanded(child: _GridTileVisual(entry: entry)),
+                Expanded(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _GridTileVisual(entry: entry),
+                      if (_selectionMode)
+                        Positioned(
+                          top: 6,
+                          left: 6,
+                          child: _TileCheckBadge(checked: selected),
+                        )
+                      else
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: _TileActionsButton(
+                            onPressed: () => entry.isFolder
+                                ? _showFolderActions(
+                                    context,
+                                    ref,
+                                    entry.folder!,
+                                  )
+                                : _showFileActions(context, ref, entry.file!),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
                   child: Column(
@@ -353,6 +500,104 @@ class VaultBrowserScreen extends ConsumerWidget {
     );
   }
 
+  /// App-bar toolbar replacing the normal actions while multi-select mode is
+  /// active: select-all plus bulk Move / Extract / Delete.
+  List<Widget> _buildSelectionActions(
+    BuildContext context,
+    WidgetRef ref,
+    VaultActionsState actions,
+    List<VaultBrowserEntry> entries,
+  ) {
+    final allSelected =
+        entries.isNotEmpty && entries.every((e) => _selected.contains(e.key));
+    return [
+      IconButton(
+        tooltip: allSelected ? 'Deselect all' : 'Select all',
+        onPressed: actions.busy
+            ? null
+            : () => setState(() {
+                if (allSelected) {
+                  _selected.clear();
+                } else {
+                  _selected.addAll([for (final e in entries) e.key]);
+                }
+              }),
+        icon: const Icon(Icons.select_all),
+      ),
+      IconButton(
+        tooltip: 'Move to…',
+        onPressed: actions.busy ? null : () => _moveSelection(context, ref),
+        icon: const Icon(Icons.drive_file_move_outlined),
+      ),
+      IconButton(
+        tooltip: 'Extract…',
+        onPressed: actions.busy ? null : () => _extractSelection(ref),
+        icon: const Icon(Icons.file_download_outlined),
+      ),
+      IconButton(
+        tooltip: 'Delete…',
+        onPressed: actions.busy ? null : () => _deleteSelection(context, ref),
+        icon: const Icon(Icons.delete_outline),
+      ),
+    ];
+  }
+
+  /// Bulk move the selected entries: pick a target through [_moveDialog];
+  /// the selection is cleared only when a move actually runs.
+  Future<void> _moveSelection(BuildContext context, WidgetRef ref) =>
+      _moveDialog(
+        context,
+        ref,
+        fileNames: _selectedFiles,
+        folderPaths: _selectedFolders,
+      );
+
+  /// Bulk extract the selected entries into a picked directory.
+  Future<void> _extractSelection(WidgetRef ref) async {
+    await ref
+        .read(vaultActionsProvider.notifier)
+        .extractEntries(
+          fileNames: _selectedFiles,
+          folderPaths: _selectedFolders,
+        );
+    _clearSelection();
+  }
+
+  /// Confirm and bulk-delete the selected entries (folders with everything
+  /// inside them).
+  Future<void> _deleteSelection(BuildContext context, WidgetRef ref) async {
+    final files = _selectedFiles;
+    final folders = _selectedFolders;
+    if (files.isEmpty && folders.isEmpty) return;
+    final count = files.length + folders.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete items'),
+        content: Text(
+          'Remove ${count == 1 ? '1 item' : '$count items'} from the vault? '
+          'Folders are deleted with everything inside them.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await ref
+          .read(vaultActionsProvider.notifier)
+          .deleteEntries(fileNames: files, folderPaths: folders);
+      _clearSelection();
+    }
+  }
+
   void _showFolderActions(
     BuildContext context,
     WidgetRef ref,
@@ -377,6 +622,19 @@ class VaultBrowserScreen extends ConsumerWidget {
             onTap: () {
               Navigator.of(sheetContext).pop();
               _renameFolderDialog(context, ref, folder);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.drive_file_move_outlined),
+            title: const Text('Move to…'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _moveDialog(
+                context,
+                ref,
+                fileNames: [],
+                folderPaths: [folder.path],
+              );
             },
           ),
           ListTile(
@@ -418,6 +676,19 @@ class VaultBrowserScreen extends ConsumerWidget {
             onTap: () {
               Navigator.of(sheetContext).pop();
               _preview(context, ref, file);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.drive_file_move_outlined),
+            title: const Text('Move to…'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _moveDialog(
+                context,
+                ref,
+                fileNames: [file.name],
+                folderPaths: [],
+              );
             },
           ),
           ListTile(
@@ -484,7 +755,102 @@ class VaultBrowserScreen extends ConsumerWidget {
     });
   }
 
-  Future<void> _newFolderDialog(BuildContext context, WidgetRef ref) async {
+  /// Pick a move target from the vault's folder tree — vault root, any existing
+  /// folder, or a brand-new folder created on the spot — then relocate
+  /// [fileNames] + [folderPaths] there. Returns whether a move ran.
+  ///
+  /// The current folder is not offered (moving within it is a no-op), and when
+  /// folders are being moved their own subtree is hidden too (a folder cannot
+  /// move into itself).
+  Future<bool> _moveDialog(
+    BuildContext context,
+    WidgetRef ref, {
+    required List<String> fileNames,
+    required List<String> folderPaths,
+  }) async {
+    final files = await ref.read(vaultFilesProvider.future);
+    if (!context.mounted) return false;
+    final folders = allFolderPaths(files).toList()..sort();
+    final currentDir = ref.read(currentVaultFolderProvider);
+
+    final excluded = <String>{currentDir};
+    for (final folder in folderPaths) {
+      excluded.add(folder);
+      excluded.addAll(folders.where((f) => f.startsWith('$folder/')));
+    }
+
+    final selectedCount = fileNames.length + folderPaths.length;
+    final itemWord = selectedCount == 1 ? '1 item' : '$selectedCount items';
+
+    final target = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Move $itemWord to…'),
+        contentPadding: const EdgeInsets.only(top: 8, bottom: 8),
+        content: SizedBox(
+          width: 380,
+          height: 340,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.create_new_folder_outlined),
+                title: const Text('New folder…'),
+                subtitle: const Text('Create a folder and move into it'),
+                onTap: () => Navigator.of(dialogContext).pop('__new__'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.home_outlined),
+                title: const Text('Vault root'),
+                onTap: () => Navigator.of(dialogContext).pop(''),
+              ),
+              for (final f in folders)
+                if (!excluded.contains(f))
+                  ListTile(
+                    dense: true,
+                    leading: Padding(
+                      padding: EdgeInsets.only(
+                        left: (f.split('/').length - 1) * 12.0,
+                      ),
+                      child: const Icon(Icons.folder_outlined),
+                    ),
+                    title: Text(basenameOf(f)),
+                    subtitle: Text(f, overflow: TextOverflow.ellipsis),
+                    onTap: () => Navigator.of(dialogContext).pop(f),
+                  ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (target == null || !context.mounted) return false;
+
+    var destPath = target;
+    if (target == '__new__') {
+      final created = await _newFolderDialog(context, ref);
+      if (created == null) return false;
+      destPath = created;
+    }
+    await ref
+        .read(vaultActionsProvider.notifier)
+        .moveEntries(
+          fileNames: fileNames,
+          folderPaths: folderPaths,
+          destPath: destPath,
+        );
+    _clearSelection();
+    return true;
+  }
+
+  Future<String?> _newFolderDialog(BuildContext context, WidgetRef ref) async {
     final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
@@ -509,21 +875,22 @@ class VaultBrowserScreen extends ConsumerWidget {
       ),
     );
     controller.dispose();
-    if (name == null || !context.mounted) return;
+    if (name == null || !context.mounted) return null;
     final trimmed = name.trim();
     if (!isValidFolderName(trimmed)) {
       showSnack(context, 'Invalid folder name.');
-      return;
+      return null;
     }
     if (await _nameExists(ref, trimmed)) {
-      if (!context.mounted) return;
+      if (!context.mounted) return null;
       showSnack(
         context,
         'A file or folder named "$trimmed" already exists here.',
       );
-      return;
+      return null;
     }
     await ref.read(vaultActionsProvider.notifier).createFolder(trimmed);
+    return _joinDir(ref, trimmed);
   }
 
   Future<void> _renameFolderDialog(
@@ -686,6 +1053,63 @@ class VaultBrowserScreen extends ConsumerWidget {
     if (confirmed == true) {
       await notifier.delete(file.name);
     }
+  }
+}
+
+/// The visible `⋯` affordance overlaid on a grid tile's top-right corner, so
+/// grid tiles offer the same per-item action sheet that list rows expose via
+/// their trailing button (previously grid actions were hidden behind
+/// long-press only).
+class _TileActionsButton extends StatelessWidget {
+  const _TileActionsButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface.withValues(alpha: 0.88),
+      shape: const CircleBorder(),
+      elevation: 1,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onPressed,
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Icon(
+            Icons.more_vert,
+            size: 20,
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Selection checkmark shown over a grid tile while multi-select mode is
+/// active.
+class _TileCheckBadge extends StatelessWidget {
+  const _TileCheckBadge({required this.checked});
+
+  final bool checked;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: scheme.surface.withValues(alpha: 0.88),
+      ),
+      padding: const EdgeInsets.all(2),
+      child: Icon(
+        checked ? Icons.check_circle : Icons.radio_button_unchecked,
+        size: 22,
+        color: checked ? scheme.primary : scheme.outline,
+      ),
+    );
   }
 }
 
@@ -1120,10 +1544,7 @@ class _DashedBorderPainter extends CustomPainter {
       ..strokeWidth = 1.6;
     final path = Path()
       ..addRRect(
-        RRect.fromRectAndRadius(
-          Offset.zero & size,
-          Radius.circular(radius),
-        ),
+        RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(radius)),
       );
     // Stroke the perimeter in a dash/gap rhythm (RRect metrics yield a
     // single contour).

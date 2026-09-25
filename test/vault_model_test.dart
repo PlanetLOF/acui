@@ -49,6 +49,35 @@ void main() {
     });
   });
 
+  group('allFolderPaths', () {
+    test('derives folders from markers and name prefixes', () {
+      final files = filesOf([
+        'Notes/.ackeep',
+        'Notes/todo.txt',
+        'Notes/2024/a.txt',
+        'Photos/2024/.ackeep',
+        'readme.md',
+      ]);
+      // A nested marker alone only declares its own path (`Photos/2024`);
+      // intermediate ancestors come from stored names, same as the browser.
+      expect(allFolderPaths(files), {'Notes', 'Notes/2024', 'Photos/2024'});
+    });
+
+    test('is empty for a flat listing', () {
+      expect(allFolderPaths(filesOf(['a.txt', 'b.txt'])), isEmpty);
+    });
+  });
+
+  group('entry keys', () {
+    test('file and folder keys are prefix-distinct', () {
+      final file = buildBrowserEntries(filesOf(['a.txt']), '')[0];
+      final folder = buildBrowserEntries(filesOf(['a.txt', 'd/x.txt']), '')[0];
+      expect(file.key, 'file:a.txt');
+      expect(folder.key, 'folder:d');
+      expect(file.key, isNot(folder.key));
+    });
+  });
+
   group('buildBrowserEntries', () {
     test('derives folders from prefixes, folders first, alphabetical', () {
       final files = filesOf([

@@ -420,6 +420,21 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
     ];
   }
 
+  /// Expand a selection of stored names + folder paths into the full set of
+  /// stored names the action should touch (folders contribute every
+  /// descendant, marker entries included; plain files pass through).
+  Future<List<String>> _expandSelection(
+    Vault session,
+    List<String> fileNames,
+    List<String> folderPaths,
+  ) async {
+    final names = <String>{...fileNames};
+    for (final folder in folderPaths) {
+      names.addAll(await _namesUnder(session, '$folder/'));
+    }
+    return names.toList();
+  }
+
   Future<void> extract(VaultFileInfo file) async {
     if (state.busy) return;
     final dir = await ref.read(fileServiceProvider).pickDirectory();
@@ -463,6 +478,141 @@ class VaultActionsNotifier extends Notifier<VaultActionsState> {
       await session.delete(name);
       await _reload();
       _notice('Deleted ${basenameOf(name)}.');
+    } on AutocipherException catch (e) {
+      _notice(exceptionText(e));
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  /// Relocate files and folders (with their whole subtree) into `destPath`
+  /// (`''` = vault root). Implemented as stored-name renames that rewrite the
+  /// folder prefix, so file ids / chunk bindings are preserved — a move is a
+  /// rename within the vault, never a re-encrypt.
+  ///
+  /// No-op renames are skipped and destination collisions are validated
+  /// up front, so a conflicting name aborts the whole move before anything
+  /// is touched.
+  Future<void> moveEntries({
+    required List<String> fileNames,
+    required List<String> folderPaths,
+    required String destPath,
+  }) async {
+    if (state.busy) return;
+    if (fileNames.isEmpty && folderPaths.isEmpty) return;
+    final session = _session;
+    if (session == null) return;
+    _setBusy(true);
+    try {
+      final renames = <({String oldName, String newName})>[];
+      for (final name in fileNames) {
+        final rel = basenameOf(name);
+        final dest = destPath.isEmpty ? rel : '$destPath/$rel';
+        if (dest == name) continue; // already there
+        renames.add((oldName: name, newName: dest));
+      }
+      for (final folder in folderPaths) {
+        final folderName = basenameOf(folder);
+        final oldPrefix = '$folder/';
+        for (final name in await _namesUnder(session, oldPrefix)) {
+          final rest = name.substring(oldPrefix.length);
+          final dest = destPath.isEmpty
+              ? '$folderName/$rest'
+              : '$destPath/$folderName/$rest';
+          if (dest == name) continue;
+          renames.add((oldName: name, newName: dest));
+        }
+      }
+      if (renames.isEmpty) {
+        _notice('Nothing to move.');
+        return;
+      }
+      // Every destination must be free (a name that is being moved away no
+      // longer counts as occupied).
+      final existing = {for (final f in await session.listFiles()) f.name};
+      final movedNames = {for (final r in renames) r.oldName};
+      for (final r in renames) {
+        if (existing.contains(r.newName) && !movedNames.contains(r.newName)) {
+          final target = destPath.isEmpty ? 'vault root' : destPath;
+          _notice(
+            'Cannot move "${basenameOf(r.newName)}": a file or folder named '
+            '"${basenameOf(r.newName)}" already exists in $target.',
+          );
+          return;
+        }
+      }
+      for (final r in renames) {
+        await session.rename(r.oldName, r.newName);
+      }
+      await _reload();
+      _notice(
+        'Moved ${_plural(fileNames.length + folderPaths.length, 'item')}.',
+      );
+    } on AutocipherException catch (e) {
+      _notice(exceptionText(e));
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  /// Delete multiple files and whole folder trees in one busy window.
+  Future<void> deleteEntries({
+    required List<String> fileNames,
+    required List<String> folderPaths,
+  }) async {
+    if (state.busy) return;
+    if (fileNames.isEmpty && folderPaths.isEmpty) return;
+    final session = _session;
+    if (session == null) return;
+    _setBusy(true);
+    try {
+      final names = await _expandSelection(session, fileNames, folderPaths);
+      if (names.isEmpty) {
+        _notice('Nothing to delete.');
+        return;
+      }
+      for (final name in names) {
+        await session.delete(name);
+      }
+      await _reload();
+      _notice('Deleted ${_plural(names.length, 'item')}.');
+    } on AutocipherException catch (e) {
+      _notice(exceptionText(e));
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  /// Extract multiple files and folder trees into the picked directory,
+  /// mirroring the stored hierarchy (a selected `Notes/a.txt` lands at
+  /// `<dir>/Notes/a.txt`, a selected folder recreates its subtree).
+  Future<void> extractEntries({
+    required List<String> fileNames,
+    required List<String> folderPaths,
+  }) async {
+    if (state.busy) return;
+    if (fileNames.isEmpty && folderPaths.isEmpty) return;
+    final dir = await ref.read(fileServiceProvider).pickDirectory();
+    if (dir == null) return;
+    final session = _session;
+    if (session == null) return;
+    _setBusy(true);
+    try {
+      final names = await _expandSelection(session, fileNames, folderPaths);
+      final sep = Platform.pathSeparator;
+      var count = 0;
+      for (final name in names) {
+        if (isFolderMarker(name)) continue;
+        final dest = '$dir$sep${name.replaceAll('/', sep)}';
+        File(dest).parent.createSync(recursive: true);
+        await session.extract(name, dest);
+        count++;
+      }
+      _notice(
+        count == 0
+            ? 'Nothing to extract.'
+            : 'Extracted ${_plural(count, 'item')} to $dir.',
+      );
     } on AutocipherException catch (e) {
       _notice(exceptionText(e));
     } finally {

@@ -61,6 +61,14 @@ class VaultBrowserEntry {
     final i = n.lastIndexOf(RegExp(r'[/\\]'));
     return i == -1 ? n : n.substring(i + 1);
   }
+
+  /// Stable identity for multi-select state: `file:<stored-name>` or
+  /// `folder:<path>`. Stored names are unique, so a file's key never collides
+  /// with a folder's.
+  String get key {
+    if (isFolder) return 'folder:${folder!.path}';
+    return 'file:${file!.name}';
+  }
 }
 
 /// Build the browser rows to show inside `currentDir` ('' = vault root) from
@@ -123,6 +131,26 @@ List<VaultBrowserEntry> buildBrowserEntries(
       ),
     for (final f in childFiles) VaultBrowserEntry.file(f),
   ];
+}
+
+/// Every folder path present in the vault listing: marker entries plus the
+/// ancestor prefix of every stored name (`Photos/2024/1.jpg` yields both
+/// `Photos` and `Photos/2024`). Used by the move-target picker.
+Set<String> allFolderPaths(List<VaultFileInfo> files) {
+  final paths = <String>{};
+  for (final f in files) {
+    final name = f.name;
+    if (isFolderMarker(name)) {
+      paths.add(folderPathOfMarker(name));
+      continue;
+    }
+    var i = name.indexOf('/');
+    while (i != -1) {
+      paths.add(name.substring(0, i));
+      i = name.indexOf('/', i + 1);
+    }
+  }
+  return paths;
 }
 
 /// Folder-name validation shared by the create/rename dialogs: non-empty, not
