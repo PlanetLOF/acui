@@ -33,7 +33,10 @@ dependency_overrides:
 flutter:
   uses-material-design: true
 
-  # Branding assets (no native engine copies here — autocipher_dart bundles
-  # its own library under lib/src/native/<os>/ and resolves it at runtime).
+  # Branding assets only. The autocipher FFI engine is NOT a Flutter asset:
+  # linux/CMakeLists.txt, windows/CMakeLists.txt and the macOS Xcode phase
+  # install it into the bundle's lib/ (or Frameworks/), where autocipher_dart's
+  # loader finds it by plain name. Run `just build-ffi` in the autocipher repo
+  # first — CMake warns and ships without it otherwise.
   assets:
     - assets/pic_svg/
