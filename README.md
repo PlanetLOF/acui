@@ -49,23 +49,11 @@ script/build_ffi.sh
 
 This drops `autocipher_ffi` into `autocipher/dart/lib/src/native/<os>/`.
 
-### Git dependency + pub cache staging
+### Automatic bundling
 
-The git dependency never transports the binary (it's gitignored), yet the
-wrapper's pubspec declares it as a Flutter asset — so `flutter test` /
-`flutter build` fail unless the staged library is also inside the package that
-pub resolved. After `flutter pub get` (and whenever the git ref or pub cache
-changes), stage it once:
-
-```bash
-# Windows
-pwsh script/stage_dev_native.ps1
-# macOS / Linux (bash or zsh)
-bash script/stage_dev_native.sh
-```
-
-`flutter build` then bundles it, and the build system also auto-stages it next
-to the app on every build:
+The git dependency never transports the binary (it's gitignored upstream), so
+the app's build system copies it into the bundle on every build, reading the
+path above directly:
 
 - **Windows** (`windows/CMakeLists.txt`): copies `autocipher_ffi.dll` beside
   the executable (loader plain-name lookup).
@@ -104,7 +92,7 @@ flutter test
 Bundling the `file_selector` plugin requires
 [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development)
 (symlink support): `start ms-settings:developers`. UI plugin bundling is the
-only thing that needs it — `flutter test` do not.
+only thing that needs it — `flutter test` does not.
 
 ## License
 

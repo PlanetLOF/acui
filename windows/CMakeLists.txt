@@ -104,8 +104,7 @@ else()
 endif()
 
 # Copy the native assets provided by the build.dart from all packages.
-# The directory is absent when no dependency ships a native-assets hook
-# (autocipher_dart bundles its engine as a Flutter asset instead).
+# The directory is absent when no dependency ships a native-assets hook.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 if(EXISTS "${NATIVE_ASSETS_DIR}")
   install(DIRECTORY "${NATIVE_ASSETS_DIR}"
